@@ -1,194 +1,165 @@
+# FULL MODIFIED CODE
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import ChatWriteForbiddenError
-import os
-import asyncio
-import json
-import threading
-import time
+import os, asyncio, json, threading, time
 from fastapi import FastAPI
 import uvicorn
+import logging
 
-# 🔹 Health check for Koyeb
+logging.basicConfig(level=logging.INFO, filename="error.log", filemode="a",
+                    format="%(asctime)s - %(levelname)s - %(message)s")
+
 app = FastAPI()
 @app.get("/")
 async def root():
     return {"status": "Bot is alive!"}
+threading.Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=8080), daemon=True).start()
 
-def run_web():
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+# Bot 1
+API_ID1 = 22938364
+API_HASH1 = "81cc7882c88b7cb7785cb1a8d59e93a8"
+SESSION1 = "1BVtsOJwBuwkpYR-rCq9C2Pl28RF9jnTdIfKG9nCQDuyXQgCy4ckTDYrEBwX4dHAVPW1zEB9i7mgtS4NRxTNpiGEOb1LOCeuwzPV5Rb0bxuYGIaF546-R8qEv3L3yz-1Ok05VmdbjGE5AF2Gno6fP4lu3tkVXcWPhNJVO-4xrR3mMN_DwTIo26OEX2h0xk_V_GW9WFJ9SXsixGnjXkqzYRX1zmUrhYc43EmucXaaOdTaKLJCKb7-hoJ6dKr3_FNrewfLEeLezznvp_S1dOhhEDz5-P_HujwOhsliOsVi7mrlxMgOeM6HYkbZzxR9okreGIP1P83fysAnokbaBh60aMukUECkVBxo="
+ADMIN1 = 6046055058
 
-threading.Thread(target=run_web, daemon=True).start()
+# Bot 2
+API_ID2 = 20222792
+API_HASH2 = "429d04a038cf62d91b3660e7794bf3c2"
+SESSION2 = "1BVtsOJwBu5si-K3e5tZfmA82R0kGC2NrDT-rOw6VAMx-7t4PIdQXE35BPdOeT2sscpS8XzW-3IzHh2OL_HSjIq0GxFKv9ZcT6mcdntLyLbVSUGikEdTnZdEGH0mGwDNQsQ8C7U9BqcGp8-3GYwEGEEMsxaIBMD2mE_blmNvVwr0-7sMlEr_6qHq07Csj4v0xRdnJ--eJ_0UpQtTNHuwBQIePdZFCV9aSqLw09I6xCf_VkwBjaZncyHt_NN8zGQWRx3Ky513TaD3QUu3PdNeO2zQebNvjXhQlwYXxuRphM93xP1WQ5Ji_k8t4BsfzaV9beV2sF1bLTrBO-EXv1Wdvr_cd3kgP1ec="
+ADMIN2 = 7791554864
 
-# 🔹 Telegram credentials
-API_ID = 22938364
-API_HASH = "81cc7882c88b7cb7785cb1a8d59e93a8"
-SESSION = "1BVtsOJwBuwkpYR-rCq9C2Pl28RF9jnTdIfKG9nCQDuyXQgCy4ckTDYrEBwX4dHAVPW1zEB9i7mgtS4NRxTNpiGEOb1LOCeuwzPV5Rb0bxuYGIaF546-R8qEv3L3yz-1Ok05VmdbjGE5AF2Gno6fP4lu3tkVXcWPhNJVO-4xrR3mMN_DwTIo26OEX2h0xk_V_GW9WFJ9SXsixGnjXkqzYRX1zmUrhYc43EmucXaaOdTaKLJCKb7-hoJ6dKr3_FNrewfLEeLezznvp_S1dOhhEDz5-P_HujwOhsliOsVi7mrlxMgOeM6HYkbZzxR9okreGIP1P83fysAnokbaBh60aMukUECkVBxo="
+# Files
+GROUPS_FILE1 = "groups1.json"
+SETTINGS_FILE1 = "settings1.json"
+GROUPS_FILE2 = "groups2.json"
+SETTINGS_FILE2 = "settings2.json"
 
-ADMINS = [6046055058]
-GROUPS_FILE = "groups.json"
-SETTINGS_FILE = "settings.json"
-
-# 🔹 Load saved data
-def load_data():
+def load_data(groups_file, settings_file, default_msg):
+    try: groups = set(json.load(open(groups_file)))
+    except: groups = set()
     try:
-        with open(GROUPS_FILE, "r") as f:
-            groups = set(json.load(f))
-    except:
-        groups = set()
-
-    try:
-        with open(SETTINGS_FILE, "r") as f:
-            data = json.load(f)
-            reply_msg = data.get("reply_msg", "SEARCH YOUR MOVIE HERE @Yourmovielinkk")
-            delete_delay = data.get("delete_delay", 15)
-            reply_gap = data.get("reply_gap", 30)
-    except:
-        reply_msg = "SEARCH YOUR MOVIE HERE @Yourmovielinkk"
-        delete_delay = 15
-        reply_gap = 30
-
-    return groups, reply_msg, delete_delay, reply_gap
-
-def save_groups(groups):
-    with open(GROUPS_FILE, "w") as f:
-        json.dump(list(groups), f)
-
-def save_settings(reply_msg, delete_delay, reply_gap):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump({"reply_msg": reply_msg, "delete_delay": delete_delay, "reply_gap": reply_gap}, f)
-
-# 🔹 Load
-TARGET_GROUPS, AUTO_REPLY_MSG, DELETE_DELAY, REPLY_GAP = load_data()
-client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
-
-# Store last reply times per group
-last_reply_time = {}
-
-# 🔹 Auto add group when userbot joins
-@client.on(events.ChatAction)
-async def auto_add_group_on_join(event):
-    if event.user_joined or event.user_added:
-        me = await client.get_me()
-        if event.user_id == me.id and event.is_group:
-            TARGET_GROUPS.add(event.chat_id)
-            save_groups(TARGET_GROUPS)
-            print(f"[+] Auto-added group: {event.chat_id}")
-
-# 🔹 Auto-reply handler (only human users)
-@client.on(events.NewMessage)
-async def handler(event):
-    global DELETE_DELAY, REPLY_GAP
-    try:
-        sender = await event.get_sender()
-        if (
-            event.chat_id in TARGET_GROUPS and
-            event.sender_id != (await client.get_me()).id and
-            not getattr(sender, 'bot', False)
-        ):
-            now = time.time()
-            last = last_reply_time.get(event.chat_id, 0)
-
-            if now - last < REPLY_GAP:
-                return  # too soon
-
-            last_reply_time[event.chat_id] = now
-            sent_msg = await event.reply(AUTO_REPLY_MSG)
-            if DELETE_DELAY > 0:
-                await asyncio.sleep(DELETE_DELAY)
-                try:
-                    await sent_msg.delete()
-                except Exception as e:
-                    print(f"[!] Couldn't delete message: {e}")
-    except ChatWriteForbiddenError:
-        print(f"[!] Cannot write in {event.chat_id}, bot might be restricted.")
-    except Exception as e:
-        print(f"[!] Unhandled error: {e}")
-
-# 🔹 Admin Commands
-@client.on(events.NewMessage(pattern="/add"))
-async def add_group(event):
-    if event.sender_id in ADMINS:
-        try:
-            group_id = int(event.message.text.split(" ", 1)[1])
-            TARGET_GROUPS.add(group_id)
-            save_groups(TARGET_GROUPS)
-            await event.reply(f"✅ Added group: `{group_id}`")
-        except:
-            await event.reply("❌ Error: Provide a valid group ID.")
-
-@client.on(events.NewMessage(pattern="/remove"))
-async def remove_group(event):
-    if event.sender_id in ADMINS:
-        try:
-            group_id = int(event.message.text.split(" ", 1)[1])
-            TARGET_GROUPS.discard(group_id)
-            save_groups(TARGET_GROUPS)
-            await event.reply(f"❎ Removed group: `{group_id}`")
-        except:
-            await event.reply("❌ Error: Provide a valid group ID.")
-
-@client.on(events.NewMessage(pattern="/setmsg"))
-async def set_msg(event):
-    global AUTO_REPLY_MSG, DELETE_DELAY, REPLY_GAP
-    if event.sender_id in ADMINS:
-        try:
-            AUTO_REPLY_MSG = event.message.text.split(" ", 1)[1]
-            save_settings(AUTO_REPLY_MSG, DELETE_DELAY, REPLY_GAP)
-            await event.reply("✅ Reply message updated!")
-        except:
-            await event.reply("❌ Error: Provide a message.")
-
-@client.on(events.NewMessage(pattern="/delmsg"))
-async def del_msg(event):
-    global AUTO_REPLY_MSG, DELETE_DELAY, REPLY_GAP
-    if event.sender_id in ADMINS:
-        AUTO_REPLY_MSG = ""
-        save_settings(AUTO_REPLY_MSG, DELETE_DELAY, REPLY_GAP)
-        await event.reply("🗑️ Auto reply message cleared.")
-
-@client.on(events.NewMessage(pattern="/setdel"))
-async def set_del(event):
-    global DELETE_DELAY, AUTO_REPLY_MSG, REPLY_GAP
-    if event.sender_id in ADMINS:
-        try:
-            seconds = int(event.message.text.split(" ", 1)[1])
-            DELETE_DELAY = max(0, seconds)
-            save_settings(AUTO_REPLY_MSG, DELETE_DELAY, REPLY_GAP)
-            await event.reply(f"⏱️ Auto-delete time set to {DELETE_DELAY} seconds.")
-        except:
-            await event.reply("❌ Error: Provide a number of seconds.")
-
-@client.on(events.NewMessage(pattern="/setgap"))
-async def set_gap(event):
-    global REPLY_GAP, DELETE_DELAY, AUTO_REPLY_MSG
-    if event.sender_id in ADMINS:
-        try:
-            seconds = int(event.message.text.split(" ", 1)[1])
-            REPLY_GAP = max(0, seconds)
-            save_settings(AUTO_REPLY_MSG, DELETE_DELAY, REPLY_GAP)
-            await event.reply(f"⏳ Time gap between replies set to {REPLY_GAP} seconds.")
-        except:
-            await event.reply("❌ Error: Provide a number of seconds.")
-
-# 🔹 Group & User ID Finder
-@client.on(events.NewMessage(pattern="/id"))
-async def id_command(event):
-    if event.is_group or event.is_channel:
-        chat = await event.get_chat()
-        await event.reply(
-            f"🆔 Group Info:\n"
-            f"👥 Group Name: {chat.title}\n"
-            f"📢 Chat ID: `{event.chat_id}`\n"
-            f"👤 Your User ID: `{event.sender_id}`"
+        d = json.load(open(settings_file))
+        return (
+            groups,
+            d.get("reply_msg", default_msg),
+            d.get("delete_delay", 15),
+            d.get("reply_gap", 30),
+            d.get("pm_msg", None)
         )
-    else:
-        await event.reply(f"👤 This is a private chat.\nYour ID: `{event.sender_id}`")
+    except: return groups, default_msg, 15, 30, None
 
-# 🔹 Start bot
-async def main():
-    print("🤖 Bot is running...")
-    await client.run_until_disconnected()
+def save_groups(path, groups): json.dump(list(groups), open(path, "w"))
+def save_settings(path, msg, d, g, pm_msg): json.dump({"reply_msg": msg, "delete_delay": d, "reply_gap": g, "pm_msg": pm_msg}, open(path, "w"))
 
-client.start()
-client.loop.run_until_complete(main())
+groups1, msg1, delay1, gap1, pm_msg1 = load_data(GROUPS_FILE1, SETTINGS_FILE1, "🤖 Bot1 here!")
+groups2, msg2, delay2, gap2, pm_msg2 = load_data(GROUPS_FILE2, SETTINGS_FILE2, "👥 Bot2 here!")
+last_reply1, last_reply2 = {}, {}
+
+client1 = TelegramClient(StringSession(SESSION1), API_ID1, API_HASH1)
+client2 = TelegramClient(StringSession(SESSION2), API_ID2, API_HASH2)
+
+# Group auto-reply handlers
+@client1.on(events.NewMessage)
+async def bot1_handler(event):
+    try:
+        if event.is_private and pm_msg1:
+            m = await event.reply(pm_msg1)
+            await asyncio.sleep(60); await m.delete()
+        elif event.chat_id in groups1 and not event.sender.bot:
+            now = time.time()
+            if now - last_reply1.get(event.chat_id, 0) < gap1: return
+            last_reply1[event.chat_id] = now
+            m = await event.reply(msg1)
+            if delay1 > 0: await asyncio.sleep(delay1); await m.delete()
+    except ChatWriteForbiddenError: pass
+    except Exception as e: logging.error(f"[Bot1] {e}")
+
+@client2.on(events.NewMessage)
+async def bot2_handler(event):
+    try:
+        if event.is_private and pm_msg2:
+            m = await event.reply(pm_msg2)
+            await asyncio.sleep(60); await m.delete()
+        elif event.chat_id in groups2 and not event.sender.bot:
+            now = time.time()
+            if now - last_reply2.get(event.chat_id, 0) < gap2: return
+            last_reply2[event.chat_id] = now
+            m = await event.reply(msg2)
+            if delay2 > 0: await asyncio.sleep(delay2); await m.delete()
+    except ChatWriteForbiddenError: pass
+    except Exception as e: logging.error(f"[Bot2] {e}")
+
+# Admin Bot1
+@client1.on(events.NewMessage)
+async def bot1_admin(e):
+    global msg1, delay1, gap1, pm_msg1
+    if e.sender_id != ADMIN1: return
+    txt = e.raw_text.strip()
+    if e.is_private:
+        if txt.startswith("/addgroup"):
+            try: gid = int(txt.split(" ",1)[1])
+            except: return await e.reply("❌ Usage: /addgroup -100xxxx")
+            groups1.add(gid); save_groups(GROUPS_FILE1, groups1); return await e.reply(f"✅ Added {gid}")
+        elif txt.startswith("/removegroup"):
+            try: gid = int(txt.split(" ",1)[1])
+            except: return await e.reply("❌ Usage: /removegroup -100xxxx")
+            groups1.discard(gid); save_groups(GROUPS_FILE1, groups1); return await e.reply(f"❌ Removed {gid}")
+        elif txt.startswith("/setmsgpm "):
+            pm_msg1 = txt.split(" ", 1)[1]; save_settings(SETTINGS_FILE1, msg1, delay1, gap1, pm_msg1)
+            return await e.reply("✅ PM auto-reply set.")
+        elif txt == "/setmsgpmoff":
+            pm_msg1 = None; save_settings(SETTINGS_FILE1, msg1, delay1, gap1, pm_msg1)
+            return await e.reply("❌ PM auto-reply turned off.")
+    if txt == "/add": groups1.add(e.chat_id); save_groups(GROUPS_FILE1, groups1); return await e.reply("✅ Group added.")
+    elif txt == "/remove": groups1.discard(e.chat_id); save_groups(GROUPS_FILE1, groups1); return await e.reply("❌ Group removed.")
+    elif txt.startswith("/setmsg "): msg1 = txt.split(" ",1)[1]; save_settings(SETTINGS_FILE1, msg1, delay1, gap1, pm_msg1); await e.reply("✅ Message set")
+    elif txt.startswith("/setdel "): delay1 = int(txt.split(" ",1)[1]); save_settings(SETTINGS_FILE1, msg1, delay1, gap1, pm_msg1); await e.reply("✅ Delete delay set")
+    elif txt.startswith("/setgap "): gap1 = int(txt.split(" ",1)[1]); save_settings(SETTINGS_FILE1, msg1, delay1, gap1, pm_msg1); await e.reply("✅ Gap set")
+    elif txt == "/status":
+        await e.reply(f"Groups: {len(groups1)}\nMsg: {msg1}\nPM msg: {pm_msg1 or '❌ Off'}\nDel: {delay1}s\nGap: {gap1}s")
+    elif txt == "/ping": await e.reply("🏓 Bot1 alive!")
+
+# Admin Bot2
+@client2.on(events.NewMessage)
+async def bot2_admin(e):
+    global msg2, delay2, gap2, pm_msg2
+    if e.sender_id != ADMIN2: return
+    txt = e.raw_text.strip()
+    if e.is_private:
+        if txt.startswith("/addgroup"):
+            try: gid = int(txt.split(" ",1)[1])
+            except: return await e.reply("❌ Usage: /addgroup -100xxxx")
+            groups2.add(gid); save_groups(GROUPS_FILE2, groups2); return await e.reply(f"✅ Added {gid}")
+        elif txt.startswith("/removegroup"):
+            try: gid = int(txt.split(" ",1)[1])
+            except: return await e.reply("❌ Usage: /removegroup -100xxxx")
+            groups2.discard(gid); save_groups(GROUPS_FILE2, groups2); return await e.reply(f"❌ Removed {gid}")
+        elif txt.startswith("/setmsgpm "):
+            pm_msg2 = txt.split(" ", 1)[1]; save_settings(SETTINGS_FILE2, msg2, delay2, gap2, pm_msg2)
+            return await e.reply("✅ PM auto-reply set.")
+        elif txt == "/setmsgpmoff":
+            pm_msg2 = None; save_settings(SETTINGS_FILE2, msg2, delay2, gap2, pm_msg2)
+            return await e.reply("❌ PM auto-reply turned off.")
+    if txt == "/add": groups2.add(e.chat_id); save_groups(GROUPS_FILE2, groups2); return await e.reply("✅ Group added.")
+    elif txt == "/remove": groups2.discard(e.chat_id); save_groups(GROUPS_FILE2, groups2); return await e.reply("❌ Group removed.")
+    elif txt.startswith("/setmsg "): msg2 = txt.split(" ",1)[1]; save_settings(SETTINGS_FILE2, msg2, delay2, gap2, pm_msg2); await e.reply("✅ Message set")
+    elif txt.startswith("/setdel "): delay2 = int(txt.split(" ",1)[1]); save_settings(SETTINGS_FILE2, msg2, delay2, gap2, pm_msg2); await e.reply("✅ Delete delay set")
+    elif txt.startswith("/setgap "): gap2 = int(txt.split(" ",1)[1]); save_settings(SETTINGS_FILE2, msg2, delay2, gap2, pm_msg2); await e.reply("✅ Gap set")
+    elif txt == "/status":
+        await e.reply(f"Groups: {len(groups2)}\nMsg: {msg2}\nPM msg: {pm_msg2 or '❌ Off'}\nDel: {delay2}s\nGap: {gap2}s")
+    elif txt == "/ping": await e.reply("🏓 Bot2 alive!")
+
+# Start both bots
+async def start_clients():
+    try: await client1.start()
+    except Exception as e: logging.error(f"[Client1] {e}")
+    try: await client2.start()
+    except Exception as e: logging.error(f"[Client2] {e}")
+    tasks = []
+    if client1.is_connected(): tasks.append(client1.run_until_disconnected())
+    if client2.is_connected(): tasks.append(client2.run_until_disconnected())
+    print("✅ Running bots...")
+    if tasks: await asyncio.gather(*tasks)
+    else: print("❌ Both clients failed.")
+
+asyncio.get_event_loop().run_until_complete(start_clients())
