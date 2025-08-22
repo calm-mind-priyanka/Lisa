@@ -14,10 +14,12 @@ logging.basicConfig(level=logging.INFO, filename="error.log", filemode="a",
 # FastAPI server
 # =====================
 app = FastAPI()
+
 @app.get("/")
 async def root():
     return {"status": "Bot is alive!"}
 
+# Run FastAPI in a separate thread
 threading.Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=8080), daemon=True).start()
 
 # =====================
@@ -74,7 +76,6 @@ last_msg_time1, last_msg_time2 = {}, {}
 msg_count1, msg_count2 = defaultdict(int), defaultdict(int)
 FLOOD_LIMIT = 3
 FLOOD_RESET = 10
-# flood memory auto-clean interval
 FLOOD_CLEAN_INTERVAL = 3600  # 1 hour
 
 client1 = TelegramClient(StringSession(SESSION1), API_ID1, API_HASH1)
@@ -97,8 +98,6 @@ async def flood_memory_cleaner():
         last_msg_time1.clear(); last_msg_time2.clear()
         msg_count1.clear(); msg_count2.clear()
         logging.info("✅ Flood memory cleaned.")
-
-asyncio.create_task(flood_memory_cleaner())
 
 # =====================
 # Safe group reply
@@ -153,7 +152,6 @@ async def bot_admin(client, event, admin_id, groups, groups_file, settings_file,
     if event.sender_id != admin_id:
         return
 
-    # PM admin commands
     if event.is_private:
         if txt.startswith("/addgroup"):
             try: gid = int(txt.split(" ",1)[1])
@@ -212,10 +210,19 @@ async def client2_handler(event):
 # Start clients
 # =====================
 async def main():
+    # Start flood memory cleaner inside the event loop
+    asyncio.create_task(flood_memory_cleaner())
+
+    # Start both bots
     await client1.start()
     await client2.start()
     print("Both bots started!")
-    await client1.run_until_disconnected()
-    await client2.run_until_disconnected()
 
+    # Keep them running
+    await asyncio.gather(
+        client1.run_until_disconnected(),
+        client2.run_until_disconnected()
+    )
+
+# Run main
 asyncio.run(main())
