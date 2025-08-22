@@ -66,11 +66,16 @@ def save_settings(path, msg, d, g, pm_msg): json.dump({"reply_msg": msg, "delete
 groups1, msg1, delay1, gap1, pm_msg1 = load_data(GROUPS_FILE1, SETTINGS_FILE1, "🤖 Bot1 here!")
 groups2, msg2, delay2, gap2, pm_msg2 = load_data(GROUPS_FILE2, SETTINGS_FILE2, "👥 Bot2 here!")
 
+# =====================
+# Memory containers
+# =====================
 last_reply1, last_reply2 = {}, {}
 last_msg_time1, last_msg_time2 = {}, {}
 msg_count1, msg_count2 = defaultdict(int), defaultdict(int)
 FLOOD_LIMIT = 3
 FLOOD_RESET = 10
+# flood memory auto-clean interval
+FLOOD_CLEAN_INTERVAL = 3600  # 1 hour
 
 client1 = TelegramClient(StringSession(SESSION1), API_ID1, API_HASH1)
 client2 = TelegramClient(StringSession(SESSION2), API_ID2, API_HASH2)
@@ -81,6 +86,19 @@ client2 = TelegramClient(StringSession(SESSION2), API_ID2, API_HASH2)
 async def reset_counter(counter_dict, chat_id):
     await asyncio.sleep(FLOOD_RESET)
     counter_dict[chat_id] = 0
+
+# =====================
+# Auto-clean flood memory
+# =====================
+async def flood_memory_cleaner():
+    while True:
+        await asyncio.sleep(FLOOD_CLEAN_INTERVAL)
+        last_reply1.clear(); last_reply2.clear()
+        last_msg_time1.clear(); last_msg_time2.clear()
+        msg_count1.clear(); msg_count2.clear()
+        logging.info("✅ Flood memory cleaned.")
+
+asyncio.create_task(flood_memory_cleaner())
 
 # =====================
 # Safe group reply
