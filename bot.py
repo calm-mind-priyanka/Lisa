@@ -1,4 +1,3 @@
-# FULL FIXED CODE
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import ChatWriteForbiddenError
@@ -6,16 +5,24 @@ import os, asyncio, json, threading, time
 from fastapi import FastAPI
 import uvicorn
 import logging
+from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO, filename="error.log", filemode="a",
                     format="%(asctime)s - %(levelname)s - %(message)s")
 
+# =====================
+# FastAPI server
+# =====================
 app = FastAPI()
 @app.get("/")
 async def root():
     return {"status": "Bot is alive!"}
+
 threading.Thread(target=lambda: uvicorn.run(app, host="0.0.0.0", port=8080), daemon=True).start()
 
+# =====================
+# Bot configs
+# =====================
 # Bot 1
 API_ID1 = 16899138
 API_HASH1 = "a42e17e6861c4a7693e236d4dc12fef6"
@@ -28,12 +35,14 @@ API_HASH2 = "820a54e11cfd089d89de40be5fa26dba"
 SESSION2 = "1AZWarzgBuxS5cIYTXRT5uqunH4ELNOMTRFKbjelfsGfHKDiJqZum3vjFqVfuloNodPHoLfaC55fO07GORmTm3WqQ8mg4e_RNd6EC7a7Q4kJLCdKKl2BT9v6tgGtEvdtQN3e_J5i2RFIxloLInDtJzES59JtMt_62tLLBnUnP_r1f2w3GTzUq6mgr1XdiNDnbs6Fv_b0g4aM1BuAgdGyTqQdiTIh_qn2vebUUSL562PPb_7rW1VpafL2FYNaQMs8CzibYSmQLrpJUPDRGiOWhgBnk3IBNf_0T2_NjsXW68sMxVmHZPoCpJhvpU0DnjBhyYqSY7acwAxO5cGeCWN72JJroVOG-y1k="
 ADMIN2 = 8352331412
 
-# Files
 GROUPS_FILE1 = "groups1.json"
 SETTINGS_FILE1 = "settings1.json"
 GROUPS_FILE2 = "groups2.json"
 SETTINGS_FILE2 = "settings2.json"
 
+# =====================
+# Load/save helpers
+# =====================
 def load_data(groups_file, settings_file, default_msg):
     try: groups = set(json.load(open(groups_file)))
     except: groups = set()
@@ -51,15 +60,29 @@ def load_data(groups_file, settings_file, default_msg):
 def save_groups(path, groups): json.dump(list(groups), open(path, "w"))
 def save_settings(path, msg, d, g, pm_msg): json.dump({"reply_msg": msg, "delete_delay": d, "reply_gap": g, "pm_msg": pm_msg}, open(path, "w"))
 
+# =====================
+# Load data
+# =====================
 groups1, msg1, delay1, gap1, pm_msg1 = load_data(GROUPS_FILE1, SETTINGS_FILE1, "🤖 Bot1 here!")
 groups2, msg2, delay2, gap2, pm_msg2 = load_data(GROUPS_FILE2, SETTINGS_FILE2, "👥 Bot2 here!")
+
 last_reply1, last_reply2 = {}, {}
+msg_count1, msg_count2 = defaultdict(int), defaultdict(int)
+FLOOD_LIMIT = 3     # max replies in short window
+FLOOD_RESET = 10    # seconds to reset counter
 
 client1 = TelegramClient(StringSession(SESSION1), API_ID1, API_HASH1)
 client2 = TelegramClient(StringSession(SESSION2), API_ID2, API_HASH2)
 
 # =====================
-# Group auto-reply handlers with anti-flood
+# Anti-flood reset function
+# =====================
+async def reset_counter(counter_dict, chat_id):
+    await asyncio.sleep(FLOOD_RESET)
+    counter_dict[chat_id] = 0
+
+# =====================
+# Bot1 handler
 # =====================
 @client1.on(events.NewMessage)
 async def bot1_handler(event):
@@ -71,15 +94,26 @@ async def bot1_handler(event):
         elif event.chat_id in groups1 and not event.sender.bot:
             now = time.time()
             last_time = last_reply1.get(event.chat_id, 0)
-            if now - last_time < gap1:  # skip if gap not passed
+            if now - last_time < gap1:
+                return
+
+            # Flood control
+            msg_count1[event.chat_id] += 1
+            if msg_count1[event.chat_id] > FLOOD_LIMIT:
                 return
             last_reply1[event.chat_id] = now
+
             m = await event.reply(msg1)
             if delay1 > 0: await asyncio.sleep(delay1)
             if delay1 > 0: await m.delete()
+
+            asyncio.create_task(reset_counter(msg_count1, event.chat_id))
     except ChatWriteForbiddenError: pass
     except Exception as e: logging.error(f"[Bot1] {e}")
 
+# =====================
+# Bot2 handler
+# =====================
 @client2.on(events.NewMessage)
 async def bot2_handler(event):
     try:
@@ -90,17 +124,25 @@ async def bot2_handler(event):
         elif event.chat_id in groups2 and not event.sender.bot:
             now = time.time()
             last_time = last_reply2.get(event.chat_id, 0)
-            if now - last_time < gap2:  # skip if gap not passed
+            if now - last_time < gap2:
+                return
+
+            # Flood control
+            msg_count2[event.chat_id] += 1
+            if msg_count2[event.chat_id] > FLOOD_LIMIT:
                 return
             last_reply2[event.chat_id] = now
+
             m = await event.reply(msg2)
             if delay2 > 0: await asyncio.sleep(delay2)
             if delay2 > 0: await m.delete()
+
+            asyncio.create_task(reset_counter(msg_count2, event.chat_id))
     except ChatWriteForbiddenError: pass
     except Exception as e: logging.error(f"[Bot2] {e}")
 
 # =====================
-# Admin commands for Bot1 and Bot2
+# Admin commands
 # =====================
 # Bot1 Admin
 @client1.on(events.NewMessage)
@@ -163,7 +205,7 @@ async def bot2_admin(e):
     elif txt == "/ping": await e.reply("🏓 Bot2 alive!")
 
 # =====================
-# Start both bots
+# Start clients
 # =====================
 async def start_clients():
     try: await client1.start()
