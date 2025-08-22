@@ -1,4 +1,4 @@
-# FULL MODIFIED CODE
+# FULL FIXED CODE
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import ChatWriteForbiddenError
@@ -58,19 +58,25 @@ last_reply1, last_reply2 = {}, {}
 client1 = TelegramClient(StringSession(SESSION1), API_ID1, API_HASH1)
 client2 = TelegramClient(StringSession(SESSION2), API_ID2, API_HASH2)
 
-# Group auto-reply handlers
+# =====================
+# Group auto-reply handlers with anti-flood
+# =====================
 @client1.on(events.NewMessage)
 async def bot1_handler(event):
     try:
         if event.is_private and pm_msg1:
             m = await event.reply(pm_msg1)
-            await asyncio.sleep(60); await m.delete()
+            await asyncio.sleep(60)
+            await m.delete()
         elif event.chat_id in groups1 and not event.sender.bot:
             now = time.time()
-            if now - last_reply1.get(event.chat_id, 0) < gap1: return
+            last_time = last_reply1.get(event.chat_id, 0)
+            if now - last_time < gap1:  # skip if gap not passed
+                return
             last_reply1[event.chat_id] = now
             m = await event.reply(msg1)
-            if delay1 > 0: await asyncio.sleep(delay1); await m.delete()
+            if delay1 > 0: await asyncio.sleep(delay1)
+            if delay1 > 0: await m.delete()
     except ChatWriteForbiddenError: pass
     except Exception as e: logging.error(f"[Bot1] {e}")
 
@@ -79,17 +85,24 @@ async def bot2_handler(event):
     try:
         if event.is_private and pm_msg2:
             m = await event.reply(pm_msg2)
-            await asyncio.sleep(60); await m.delete()
+            await asyncio.sleep(60)
+            await m.delete()
         elif event.chat_id in groups2 and not event.sender.bot:
             now = time.time()
-            if now - last_reply2.get(event.chat_id, 0) < gap2: return
+            last_time = last_reply2.get(event.chat_id, 0)
+            if now - last_time < gap2:  # skip if gap not passed
+                return
             last_reply2[event.chat_id] = now
             m = await event.reply(msg2)
-            if delay2 > 0: await asyncio.sleep(delay2); await m.delete()
+            if delay2 > 0: await asyncio.sleep(delay2)
+            if delay2 > 0: await m.delete()
     except ChatWriteForbiddenError: pass
     except Exception as e: logging.error(f"[Bot2] {e}")
 
-# Admin Bot1
+# =====================
+# Admin commands for Bot1 and Bot2
+# =====================
+# Bot1 Admin
 @client1.on(events.NewMessage)
 async def bot1_admin(e):
     global msg1, delay1, gap1, pm_msg1
@@ -119,7 +132,7 @@ async def bot1_admin(e):
         await e.reply(f"Groups: {len(groups1)}\nMsg: {msg1}\nPM msg: {pm_msg1 or '❌ Off'}\nDel: {delay1}s\nGap: {gap1}s")
     elif txt == "/ping": await e.reply("🏓 Bot1 alive!")
 
-# Admin Bot2
+# Bot2 Admin
 @client2.on(events.NewMessage)
 async def bot2_admin(e):
     global msg2, delay2, gap2, pm_msg2
@@ -149,7 +162,9 @@ async def bot2_admin(e):
         await e.reply(f"Groups: {len(groups2)}\nMsg: {msg2}\nPM msg: {pm_msg2 or '❌ Off'}\nDel: {delay2}s\nGap: {gap2}s")
     elif txt == "/ping": await e.reply("🏓 Bot2 alive!")
 
+# =====================
 # Start both bots
+# =====================
 async def start_clients():
     try: await client1.start()
     except Exception as e: logging.error(f"[Client1] {e}")
