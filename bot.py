@@ -1,7 +1,7 @@
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.errors import ChatWriteForbiddenError, FloodWaitError
-import os, asyncio, json, threading, time, requests
+import os, asyncio, json, threading, time
 from fastapi import FastAPI
 import uvicorn
 import logging
@@ -49,42 +49,6 @@ SETTINGS_FILE2 = "settings2.json"
 IGNORE_IDS = {6462141921}
 
 # =====================
-# Proxy handling (startup only)
-# =====================
-PROXIES = []
-proxy_index = -1
-
-def fetch_free_proxies():
-    global PROXIES
-    try:
-        r = requests.get(
-            "https://api.proxyscrape.com/v2/?request=getproxies&protocol=socks5&timeout=10000&country=all",
-            timeout=15
-        )
-        if r.status_code == 200:
-            lines = r.text.splitlines()
-            PROXIES = [line.strip() for line in lines if line.strip()]
-            logging.info(f"✅ Fetched {len(PROXIES)} proxies.")
-    except Exception as e:
-        logging.error(f"[ProxyFetch] {e}")
-
-def get_next_proxy():
-    global proxy_index
-    if not PROXIES:
-        fetch_free_proxies()
-    if not PROXIES:
-        return None
-    proxy_index = (proxy_index + 1) % len(PROXIES)
-    host, port = PROXIES[proxy_index].split(":")
-    logging.info(f"🔄 Using proxy {host}:{port}")
-    return {"proxy_type": "socks5", "addr": host, "port": int(port)}
-
-async def rotate_proxy(_client):
-    # Runtime proxy rotation is not safely supported; log and return.
-    logging.info("[ProxyRotate] Proxy rotation at runtime is skipped.")
-    return
-
-# =====================
 # Load/save helpers
 # =====================
 def load_data(groups_file, settings_file, default_msg):
@@ -127,10 +91,10 @@ FLOOD_RESET = 10
 FLOOD_CLEAN_INTERVAL = 3600
 
 # =====================
-# Clients (proxy chosen once at startup)
+# Clients
 # =====================
-client1 = TelegramClient(StringSession(SESSION1), API_ID1, API_HASH1, proxy=get_next_proxy())
-client2 = TelegramClient(StringSession(SESSION2), API_ID2, API_HASH2, proxy=get_next_proxy())
+client1 = TelegramClient(StringSession(SESSION1), API_ID1, API_HASH1)
+client2 = TelegramClient(StringSession(SESSION2), API_ID2, API_HASH2)
 
 # =====================
 # Anti-flood reset
@@ -152,16 +116,13 @@ async def flood_memory_cleaner():
 # =====================
 async def safe_group_reply(client, event, groups, last_reply, last_msg_time, msg_count, msg_text, delay, gap):
     try:
-        # Skip ignored users
         if event.sender_id in IGNORE_IDS:
             return
 
-        # Ensure we can check if sender is a bot safely
         sender = await event.get_sender()
         if getattr(sender, "bot", False):
             return
 
-        # Only reply in configured groups
         if event.chat_id not in groups:
             return
 
@@ -189,15 +150,11 @@ async def safe_group_reply(client, event, groups, last_reply, last_msg_time, msg
         asyncio.create_task(reset_counter(msg_count, event.chat_id))
 
     except ChatWriteForbiddenError:
-        # cannot write in this chat
         pass
     except FloodWaitError as e:
         logging.warning(f"[FloodWait] {e}.")
-        await rotate_proxy(client)
     except (ConnectionError, OSError, asyncio.TimeoutError) as e:
-        # built-in ConnectionError (NOT telethon.errors.ConnectionError)
         logging.warning(f"[Network] {e}.")
-        await rotate_proxy(client)
     except Exception as e:
         logging.error(f"[SafeGroupReply] {e}")
 
@@ -324,7 +281,6 @@ async def client2_handler(event):
 # =====================
 async def main():
     asyncio.create_task(flood_memory_cleaner())
-    # Start both clients
     await client1.start()
     await client2.start()
     print("Both bots started!")
