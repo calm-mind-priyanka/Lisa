@@ -43,6 +43,11 @@ GROUPS_FILE2 = "groups2.json"
 SETTINGS_FILE2 = "settings2.json"
 
 # =====================
+# Ignore list
+# =====================
+IGNORE_IDS = {6462141921}  # these users will be ignored by both bots
+
+# =====================
 # Load/save helpers
 # =====================
 def load_data(groups_file, settings_file, default_msg):
@@ -106,6 +111,8 @@ async def safe_group_reply(client, event, groups, last_reply, last_msg_time, msg
     try:
         if event.chat_id not in groups or event.sender.bot:
             return
+        if event.sender_id in IGNORE_IDS:
+            return
         now = time.time()
         if event.message.date.timestamp() <= last_msg_time.get(event.chat_id, 0):
             return
@@ -135,6 +142,8 @@ async def safe_group_reply(client, event, groups, last_reply, last_msg_time, msg
 # =====================
 async def handle_event(client, event, groups, last_reply, last_msg_time, msg_count, msg_text, delay, gap, pm_msg):
     try:
+        if event.sender_id in IGNORE_IDS:
+            return
         if event.is_private and pm_msg:
             m = await event.reply(pm_msg)
             await asyncio.sleep(60)
@@ -198,11 +207,15 @@ msg2_var, delay2_var, gap2_var, pm_msg2_var = [msg2], [delay2], [gap2], [pm_msg2
 # =====================
 @client1.on(events.NewMessage)
 async def client1_handler(event):
+    if event.sender_id in IGNORE_IDS:
+        return
     await handle_event(client1, event, groups1, last_reply1, last_msg_time1, msg_count1, msg1_var[0], delay1_var[0], gap1_var[0], pm_msg1_var[0])
     await bot_admin(client1, event, ADMIN1, groups1, GROUPS_FILE1, SETTINGS_FILE1, msg1_var, delay1_var, gap1_var, pm_msg1_var, last_reply1, msg_count1)
 
 @client2.on(events.NewMessage)
 async def client2_handler(event):
+    if event.sender_id in IGNORE_IDS:
+        return
     await handle_event(client2, event, groups2, last_reply2, last_msg_time2, msg_count2, msg2_var[0], delay2_var[0], gap2_var[0], pm_msg2_var[0])
     await bot_admin(client2, event, ADMIN2, groups2, GROUPS_FILE2, SETTINGS_FILE2, msg2_var, delay2_var, gap2_var, pm_msg2_var, last_reply2, msg_count2)
 
