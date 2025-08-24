@@ -1,5 +1,4 @@
 telethon
 fastapi
 uvicorn
-requests
-pysocks
+
