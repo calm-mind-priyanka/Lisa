@@ -152,7 +152,8 @@ async def safe_group_reply(client, event, groups, last_reply, last_msg_time, msg
     except ChatWriteForbiddenError:
         pass
     except FloodWaitError as e:
-        logging.warning(f"[FloodWait] {e}.")
+        logging.warning(f"[FloodWait] Sleeping {e.seconds}s")
+        await asyncio.sleep(e.seconds)   # FIX: wait flood time then continue
     except (ConnectionError, OSError, asyncio.TimeoutError) as e:
         logging.warning(f"[Network] {e}.")
     except Exception as e:
@@ -260,37 +261,71 @@ msg2_var, delay2_var, gap2_var, pm_msg2_var = [msg2], [delay2], [gap2], [pm_msg2
 # =====================
 @client1.on(events.NewMessage)
 async def client1_handler(event):
-    if event.sender_id in IGNORE_IDS:
-        return
-    await handle_event(client1, event, groups1, last_reply1, last_msg_time1, msg_count1,
-                       msg1_var[0], delay1_var[0], gap1_var[0], pm_msg1_var[0])
-    await bot_admin(client1, event, ADMIN1, groups1, GROUPS_FILE1, SETTINGS_FILE1,
-                    msg1_var, delay1_var, gap1_var, pm_msg1_var, last_reply1, msg_count1)
+    try:
+        if event.sender_id in IGNORE_IDS:
+            return
+        await handle_event(client1, event, groups1, last_reply1, last_msg_time1, msg_count1,
+                           msg1_var[0], delay1_var[0], gap1_var[0], pm_msg1_var[0])
+        await bot_admin(client1, event, ADMIN1, groups1, GROUPS_FILE1, SETTINGS_FILE1,
+                        msg1_var, delay1_var, gap1_var, pm_msg1_var, last_reply1, msg_count1)
+    except Exception as e:
+        logging.error(f"[Client1Handler] {e}")
 
 @client2.on(events.NewMessage)
 async def client2_handler(event):
-    if event.sender_id in IGNORE_IDS:
-        return
-    await handle_event(client2, event, groups2, last_reply2, last_msg_time2, msg_count2,
-                       msg2_var[0], delay2_var[0], gap2_var[0], pm_msg2_var[0])
-    await bot_admin(client2, event, ADMIN2, groups2, GROUPS_FILE2, SETTINGS_FILE2,
-                    msg2_var, delay2_var, gap2_var, pm_msg2_var, last_reply2, msg_count2)
+    try:
+        if event.sender_id in IGNORE_IDS:
+            return
+        await handle_event(client2, event, groups2, last_reply2, last_msg_time2, msg_count2,
+                           msg2_var[0], delay2_var[0], gap2_var[0], pm_msg2_var[0])
+        await bot_admin(client2, event, ADMIN2, groups2, GROUPS_FILE2, SETTINGS_FILE2,
+                        msg2_var, delay2_var, gap2_var, pm_msg2_var, last_reply2, msg_count2)
+    except Exception as e:
+        logging.error(f"[Client2Handler] {e}")
+
+# =====================
+# Keep-alive + Restart loop
+# =====================
+async def keep_alive(client):
+    while True:
+        try:
+            await client.get_me()
+        except Exception as e:
+            logging.warning(f"[KeepAlive] {e}")
+        await asyncio.sleep(300)
+
+async def run_client(client):
+    while True:
+        try:
+            await client.run_until_disconnected()
+        except Exception as e:
+            logging.error(f"Client crashed: {e}, restarting in 5s")
+            await asyncio.sleep(5)
 
 # =====================
 # Main function
 # =====================
 async def main():
     asyncio.create_task(flood_memory_cleaner())
+
     await client1.start()
     await client2.start()
     print("Both bots started!")
+
+    asyncio.create_task(keep_alive(client1))
+    asyncio.create_task(keep_alive(client2))
+
     await asyncio.gather(
-        client1.run_until_disconnected(),
-        client2.run_until_disconnected()
+        run_client(client1),
+        run_client(client2)
     )
 
 # =====================
 # Start main
 # =====================
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+    try:
+        asyncio.get_event_loop().run_until_complete(main())
+    except KeyboardInterrupt:
+        sys.exit()
