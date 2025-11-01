@@ -33,10 +33,10 @@ threading.Thread(
 # =====================
 # Bot Config
 # =====================
-API_ID = 20813384
-API_HASH = "e7523a805e3adb211815eb6e689b21ab"
-SESSION = "1BVtsOHUBu18w3N88LMIgm-qFXd7m0_devnKmMSN1WiDRJq5--nFFLCf9ulA97cQ4SRN_ryiof3Sovl-PANnsghVtsKLml0e5bakMz9mLRpAYl_Ep5rk0BMWRiKItes5PAGpCG9STsE2aJEqP7GrdPUtkKQY6FslmuT9A8DCtgEzTlINO_TBdtYS6cRmdlowGsh3PNGmpzWAdpte3LvWxaU3wjgtbtYU-38yxIvOde5_DaX5z_EBPRPqdeZ2uz88u7-kfRjovHCJx7q27reLMLVTFW-6ZwJjU6XHQ_B_1w6VIyOZSv2OASRnsSl__ssIlvdZm2V6vhXRPBI2CxEfhAQ3bqECYH9Q="
-ADMIN_ID = 8375460468
+API_ID = 16899138
+API_HASH = "a42e17e6861c4a7693e236d4dc12fef6"
+SESSION = "1AZWarzgBu4nJ_W6KLYr10cf1sF4eBi70miM9P4Q2ar2zPUSICuQS8KLyj-Qww-8NjJOmXlsi7RBzMgu9OKp7e62WGRvcRns54oXbor6fp9cE9NVo7NZ8e7OG8KojJ4bB1trc9dCzzCbQx78flQ57ze5N1RxglckzS8aSFYO4nkpTXSfgHxgBZxONJrdFtGzd4v8LT1VUCf8C3_49GG7bg1tztJ-fBkWv1B_g7FJoYLZnnSvay5Jp2_-z_bwITA0I8f3NKRCeRSVUPgtPENKVkZ_mwDcgjZgnPb5qh2af2RLPFzAbElEn_iDYpRZQr3MsB4bynJQOYisKNRZBvKpM4IcBmW6_kNY="
+ADMIN_ID = 8223402637
 
 GROUPS_FILE = "groups.json"
 SETTINGS_FILE = "settings.json"
@@ -154,6 +154,8 @@ async def safe_group_reply(event):
 # =====================
 @client.on(events.NewMessage)
 async def handler(event):
+    global reply_msg, delete_delay, reply_gap, pm_msg  # ✅ FIXED: declare globals at top
+
     try:
         if event.sender_id in IGNORE_IDS:
             return
@@ -190,7 +192,6 @@ async def handler(event):
                     return await event.reply(f"❌ Removed {gid}")
 
                 elif txt.startswith("/setmsgpm "):
-                    global pm_msg
                     pm_msg = txt.split(" ", 1)[1]
                     save_settings(SETTINGS_FILE, reply_msg, delete_delay, reply_gap, pm_msg)
                     return await event.reply("✅ PM auto-reply set.")
@@ -207,17 +208,14 @@ async def handler(event):
                 groups.discard(event.chat_id); save_groups(GROUPS_FILE, groups)
                 return await event.reply("❌ Group removed.")
             elif txt.startswith("/setmsg "):
-                global reply_msg
                 reply_msg = txt.split(" ", 1)[1]
                 save_settings(SETTINGS_FILE, reply_msg, delete_delay, reply_gap, pm_msg)
                 return await event.reply("✅ Message updated.")
             elif txt.startswith("/setdel "):
-                global delete_delay
                 delete_delay = int(txt.split(" ", 1)[1])
                 save_settings(SETTINGS_FILE, reply_msg, delete_delay, reply_gap, pm_msg)
                 return await event.reply("✅ Delete delay updated.")
             elif txt.startswith("/setgap "):
-                global reply_gap
                 reply_gap = int(txt.split(" ", 1)[1])
                 save_settings(SETTINGS_FILE, reply_msg, delete_delay, reply_gap, pm_msg)
                 return await event.reply("✅ Reply gap updated.")
@@ -239,7 +237,7 @@ async def handler(event):
             elif txt == "/ping":
                 return await event.reply("🏓 Bot alive!")
 
-        # Normal message handler
+        # Normal group message reply
         await safe_group_reply(event)
 
     except Exception as e:
