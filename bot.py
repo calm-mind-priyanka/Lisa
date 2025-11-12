@@ -9,6 +9,7 @@ import asyncio
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import List, Tuple, Optional
 from telethon import TelegramClient, events, Button
 from fastapi import FastAPI
 import uvicorn
@@ -19,7 +20,7 @@ import uvicorn
 API_ID = int(os.getenv("API_ID", "24222039"))       # from my.telegram.org
 API_HASH = os.getenv("API_HASH", "6dd2dc70434b2f577f76a2e993135662")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8430798122:AAHOcHZn2-w7Wq2OU0pUVRAiN47Y4e7vnLE")
-BOT_USERNAME = os.getenv("Victoroorrrbot", None)     # optional: your bot username without @
+BOT_USERNAME = os.getenv("BOT_USERNAME", None)     # optional: your bot username without @
 
 # Admin user id (yours)
 ADMIN_ID = 6046055058
@@ -43,6 +44,7 @@ def get_conn():
 
 def init_db():
     conn = get_conn(); cur = conn.cursor()
+    # files table now includes reply_chat_id/reply_msg_id so we can delete the "saved" reply when auto-delete fires
     cur.execute("""
         CREATE TABLE IF NOT EXISTS files (
             code TEXT PRIMARY KEY,
@@ -52,7 +54,9 @@ def init_db():
             caption TEXT,
             file_type TEXT,
             created_at INTEGER,
-            delete_at INTEGER
+            delete_at INTEGER,
+            reply_chat_id INTEGER,
+            reply_msg_id INTEGER
         )
     """)
     cur.execute("""
@@ -66,17 +70,17 @@ def init_db():
     cur.execute("INSERT OR IGNORE INTO settings (id, auto_delete_enabled, delete_seconds, protect_content) VALUES (1,0,0,0)")
     conn.commit(); conn.close()
 
-def add_file_record(code, owner_id, file_id, file_name, caption, file_type, created_at=None, delete_at=None):
+def add_file_record(code, owner_id, file_id, file_name, caption, file_type, created_at=None, delete_at=None, reply_chat_id=None, reply_msg_id=None):
     conn = get_conn(); cur = conn.cursor()
     cur.execute("""
-        INSERT OR REPLACE INTO files (code, owner_id, file_id, file_name, caption, file_type, created_at, delete_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (code, owner_id, file_id, file_name, caption, file_type, int(created_at or time.time()), int(delete_at) if delete_at else None))
+        INSERT OR REPLACE INTO files (code, owner_id, file_id, file_name, caption, file_type, created_at, delete_at, reply_chat_id, reply_msg_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (code, owner_id, file_id, file_name, caption, file_type, int(created_at or time.time()), int(delete_at) if delete_at else None, reply_chat_id, reply_msg_id))
     conn.commit(); conn.close()
 
 def get_file_record(code):
     conn = get_conn(); cur = conn.cursor()
-    cur.execute("SELECT code, owner_id, file_id, file_name, caption, file_type, created_at, delete_at FROM files WHERE code = ?", (code,))
+    cur.execute("SELECT code, owner_id, file_id, file_name, caption, file_type, created_at, delete_at, reply_chat_id, reply_msg_id FROM files WHERE code = ?", (code,))
     row = cur.fetchone(); conn.close()
     return row
 
@@ -120,9 +124,10 @@ def set_setting(auto_delete=None, delete_seconds=None, protect_content=None):
 def gen_code():
     return uuid.uuid4().hex[:12]
 
-_url_re = re.compile(r'https?://\S+|www\.\S+')
+# improved URL + mention regex (removes http(s), www, t.me, telegram.me, and @user)
+_url_re = re.compile(r'(https?://\S+|www\.\S+|t\.me/\S+|telegram\.me/\S+)', flags=re.IGNORECASE)
 _mention_re = re.compile(r'@[\w_]+')
-_channel_link_re = re.compile(r'tg://joinchat/\S+|telegram.me/\S+|t.me/\S+')
+_channel_link_re = re.compile(r'tg://joinchat/\S+', flags=re.IGNORECASE)
 
 def sanitize_caption(text: str):
     if not text:
@@ -178,26 +183,50 @@ async def ensure_username():
 # -------------------------
 scheduled_tasks = {}  # code -> asyncio.Task
 
-async def schedule_delete(code: str, when_ts: int):
+async def _delete_messages_safe(pairs: List[Tuple[int,int]]):
+    """Delete given messages (chat_id, msg_id) safely."""
+    for chat_id, msg_id in pairs:
+        try:
+            await client.delete_messages(chat_id, [msg_id])
+        except Exception:
+            log.warning("Could not delete message %s in chat %s", msg_id, chat_id)
+
+async def schedule_delete(code: str, when_ts: int, extra_messages: Optional[List[Tuple[int,int]]] = None):
+    """Schedule deletion of DB record and optionally messages at when_ts.
+       extra_messages: list of (chat_id, msg_id) to delete at that time (e.g. per-download file+notice)
+    """
     now = int(time.time())
     delay = max(0, when_ts - now)
-    # cancel existing
     if code in scheduled_tasks:
         try:
             scheduled_tasks[code].cancel()
         except Exception:
             pass
+
     async def _job():
         try:
             await asyncio.sleep(delay)
+            # attempt to delete any DB-stored reply message first
+            rec = get_file_record(code)
+            msgs_to_delete = []
+            if rec:
+                _, _, _, _, _, _, _, _, reply_chat_id, reply_msg_id = rec
+                if reply_chat_id and reply_msg_id:
+                    msgs_to_delete.append((reply_chat_id, reply_msg_id))
+            # include extra messages passed when scheduling (per-download)
+            if extra_messages:
+                msgs_to_delete.extend(extra_messages)
+            if msgs_to_delete:
+                await _delete_messages_safe(msgs_to_delete)
             # delete DB record
             delete_file_record(code)
-            log.info("Auto-deleted file record %s", code)
+            log.info("Auto-deleted file %s and cleaned messages", code)
             scheduled_tasks.pop(code, None)
         except asyncio.CancelledError:
             return
         except Exception:
             log.exception("Error in scheduled delete for %s", code)
+
     task = asyncio.create_task(_job())
     scheduled_tasks[code] = task
 
@@ -242,15 +271,32 @@ async def start_handler(event):
         if not rec:
             await event.respond("❌ File not found or expired.")
             return
-        _, owner_id, file_id, file_name, caption, file_type, created_at, delete_at = rec
+        _, owner_id, file_id, file_name, caption, file_type, created_at, delete_at, reply_chat_id, reply_msg_id = rec
         s = get_settings()
         protect = s["protect_content"]
+
+        # send file to the requester and, if delete_at set, schedule deletion of the sent file + notice
         try:
-            # send stored file_id - will not show forwarded tag because it's a new send
-            await client.send_file(event.sender_id, file=file_id, caption=caption or file_name, force_document=False, allow_cache=True, supports_streaming=True, protect_content=bool(protect))
+            file_msg = await client.send_file(event.sender_id, file=file_id, caption=caption or file_name, force_document=False, allow_cache=True, supports_streaming=True, protect_content=bool(protect))
         except Exception:
             log.exception("Failed to send file for code %s", code)
             await event.respond("⚠️ Failed to send file. Try again later.")
+            return
+
+        # if auto-delete configured for this file, compute remaining seconds and schedule deletion
+        if delete_at:
+            now = int(time.time())
+            remaining = delete_at - now
+            if remaining > 0:
+                # send notice below file (reply)
+                notice_text = f"⏳ This file will auto-delete in {human_seconds(remaining)}. Please forward/save now if you need it."
+                try:
+                    notice_msg = await client.send_message(event.sender_id, notice_text, reply_to=file_msg.id)
+                    # schedule deletion of the pair (file_msg and notice_msg) at delete_at
+                    extra = [(event.sender_id, file_msg.id), (event.sender_id, notice_msg.id)]
+                    await schedule_delete(code, delete_at, extra_messages=extra)
+                except Exception:
+                    log.exception("Failed to send notice or schedule per-download delete for %s", code)
         return
 
     await event.respond("Unknown start parameter. Send a file to generate a link.")
@@ -348,9 +394,7 @@ async def handle_incoming(event):
     sanitized_caption = sanitize_caption(original_caption)
 
     file_obj = msg.file
-    # file_id - store as string
     file_id = getattr(file_obj, "id", None)
-    # For some media, id property can be bytes-like or large; cast to str
     file_id = str(file_id)
     file_name = getattr(file_obj, "name", None) or ""
     file_type = getattr(file_obj, "mime_type", None) or ""
@@ -362,34 +406,39 @@ async def handle_incoming(event):
     if s["auto_delete_enabled"] and s["delete_seconds"] > 0:
         delete_at = created_at + s["delete_seconds"]
 
-    add_file_record(code=code, owner_id=sender.id, file_id=file_id, file_name=file_name, caption=sanitized_caption, file_type=file_type, created_at=created_at, delete_at=delete_at)
+    # First, reply so user sees link; capture reply message id so we can delete it later
+    await ensure_username()
+    share_link = f"https://t.me/{BOT_USERNAME}?start=file_{code}"
+    btns = [
+        [Button.url("📎 Get / Share Link", share_link)],
+        [Button.inline("📁 My Files", b"my_files"), Button.inline("🗑 Delete", f"del_{code}".encode())]
+    ]
+    delete_msg_text = f"\n\n⏳ This file will auto-delete in {human_seconds(s['delete_seconds'])}." if delete_at else ""
+    reply_text = (
+        f"✅ **File Saved Successfully!**\n\n"
+        f"📄 **Name:** `{file_name or 'Unnamed'}`\n"
+        f"💬 **Caption:** {sanitized_caption or '—'}\n"
+        f"🔗 **Share Link:** {share_link}"
+        f"{delete_msg_text}"
+    )
+    try:
+        reply_obj = await event.reply(reply_text, buttons=btns, link_preview=False)
+        reply_chat_id = reply_obj.chat_id
+        reply_msg_id = reply_obj.id
+    except Exception:
+        reply_chat_id = None
+        reply_msg_id = None
 
+    # store record (store reply ids so the saved message can be deleted when auto-delete fires)
+    add_file_record(code=code, owner_id=sender.id, file_id=file_id, file_name=file_name, caption=sanitized_caption, file_type=file_type, created_at=created_at, delete_at=delete_at, reply_chat_id=reply_chat_id, reply_msg_id=reply_msg_id)
+
+    # schedule DB delete + attempt to delete saved reply message when time arrives
     if delete_at:
         try:
             await schedule_delete(code, delete_at)
         except Exception:
             log.exception("Failed scheduling delete for %s", code)
 
-    await ensure_username()
-    share_link = f"https://t.me/{BOT_USERNAME}?start=file_{code}"
-
-    delete_msg = f"\n\n⏳ This file will auto-delete in {human_seconds(s['delete_seconds'])}." if delete_at else ""
-
-    btns = [
-        [Button.url("📎 Get / Share Link", share_link)],
-        [Button.inline("📁 My Files", b"my_files"), Button.inline("🗑 Delete", f"del_{code}".encode())]
-    ]
-    reply_text = (
-        f"✅ **File Saved Successfully!**\n\n"
-        f"📄 **Name:** `{file_name or 'Unnamed'}`\n"
-        f"💬 **Caption:** {sanitized_caption or '—'}\n"
-        f"🔗 **Share Link:** {share_link}"
-        f"{delete_msg}"
-    )
-    try:
-        await event.reply(reply_text, buttons=btns, link_preview=False)
-    except Exception:
-        await event.reply("✅ File saved. Use /myfiles to view.")
     log.info("Saved file code=%s owner=%s file_id=%s", code, sender.id, file_id)
 
 # -------------------------
@@ -420,10 +469,16 @@ async def callback_handler(event):
         if not rec:
             await event.answer("File not found.", alert=True)
             return
-        _, owner_id, file_id, file_name, caption, file_type, created_at, delete_at = rec
+        _, owner_id, file_id, file_name, caption, file_type, created_at, delete_at, reply_chat_id, reply_msg_id = rec
         if sender.id != owner_id and not is_admin(sender.id):
             await event.answer("Only owner or admin can delete this file.", alert=True)
             return
+        # delete DB record and attempt to remove saved reply/notice messages
+        if reply_chat_id and reply_msg_id:
+            try:
+                await client.delete_messages(reply_chat_id, [reply_msg_id])
+            except Exception:
+                pass
         delete_file_record(code)
         if code in scheduled_tasks:
             try:
