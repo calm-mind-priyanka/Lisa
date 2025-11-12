@@ -12,6 +12,8 @@ import uvicorn
 # =============================
 # CONFIGURATION
 # =============================
+API_ID = int(os.getenv("API_ID", "24222039"))  # from https://my.telegram.org
+API_HASH = os.getenv("API_HASH", "6dd2dc70434b2f577f76a2e993135662")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8430798122:AAHOcHZn2-w7Wq2OU0pUVRAiN47Y4e7vnLE")
 
 # Storage setup
@@ -73,7 +75,7 @@ def get_file(code):
 # =============================
 # TELETHON CLIENT
 # =============================
-client = TelegramClient("bot", 0, 0).start(bot_token=BOT_TOKEN)
+client = TelegramClient("bot_session", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
 
 async def get_username():
@@ -97,8 +99,8 @@ async def start_handler(event):
             "👋 **Welcome to FileStore Bot!**\n\n"
             "📦 Send me **any file** (video, photo, document, audio, etc.) and I’ll give you a **permanent link**.\n\n"
             "✅ Works for **forwarded** files too!\n"
-            "🔗 You can share the generated link with anyone — they’ll get the file directly from me.\n\n"
-            "✨ *Built for creators, movie sharers & file lovers.*"
+            "🔗 Share your generated link with anyone — they’ll get the file directly.\n\n"
+            "✨ *Professional File Hosting Bot — Fast, Simple, Secure.*"
         )
         buttons = [
             [Button.inline("📁 My Files", b"my_files")],
@@ -123,7 +125,7 @@ async def start_handler(event):
 
 
 # =============================
-# EVENT: On any file received
+# EVENT: On any file received (forward or uploaded)
 # =============================
 @client.on(events.NewMessage(incoming=True))
 async def save_file(event):
@@ -148,17 +150,17 @@ async def save_file(event):
         ]
 
         reply = (
-            f"✅ **File Saved!**\n\n"
+            f"✅ **File Saved Successfully!**\n\n"
             f"📄 **Name:** `{file_name}`\n"
             f"💾 **Type:** `{file_type}`\n\n"
             f"🔗 **Share Link:** {share_link}\n\n"
-            f"Anyone with this link can download your file directly (no forward tag)."
+            f"Send this link to anyone — they’ll get the file directly (no forward tag)."
         )
         await event.reply(reply, buttons=buttons, link_preview=False)
 
     except Exception as e:
         log.exception(e)
-        await event.reply("⚠️ Error while saving file. Try again.")
+        await event.reply("⚠️ Error while saving file. Try again later.")
 
 
 # =============================
