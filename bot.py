@@ -15,9 +15,9 @@ from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
 # CONFIG - Put your details here or use environment variables
 # -----------------------
 # It's safe to put them directly here if you want:
-API_ID = int(os.getenv("API_ID", "YOUR_API_ID"))           # e.g. 1234567
-API_HASH = os.getenv("API_HASH", "YOUR_API_HASH")         # e.g. "abcd1234..."
-BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN")      # e.g. "123:ABC..."
+API_ID = int(os.getenv("API_ID", "24222039"))           # e.g. 1234567
+API_HASH = os.getenv("API_HASH", "6dd2dc70434b2f577f76a2e993135662")         # e.g. "abcd1234..."
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8430798122:AAHOcHZn2-w7Wq2OU0pUVRAiN47Y4e7vnLE")      # e.g. "123:ABC..."
 # -----------------------
 
 # Storage paths
