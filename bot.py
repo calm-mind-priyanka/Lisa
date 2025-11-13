@@ -71,20 +71,6 @@ def init_db():
         )
     """)
     cur.execute("INSERT OR IGNORE INTO settings (id, auto_delete_enabled, delete_seconds, protect_content) VALUES (1,0,0,0)")
-    # verify settings table
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS verify_settings (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            verify1_enabled INTEGER DEFAULT 0,
-            verify1_shortener_template TEXT DEFAULT '',
-            verify1_api_key TEXT DEFAULT '',
-            verify2_enabled INTEGER DEFAULT 0,
-            verify2_shortener_template TEXT DEFAULT '',
-            verify2_api_key TEXT DEFAULT '',
-            verify2_delay_seconds INTEGER DEFAULT 60
-        )
-    """)
-    cur.execute("INSERT OR IGNORE INTO verify_settings (id) VALUES (1)")
     conn.commit(); conn.close()
 
 # file helpers
@@ -134,29 +120,6 @@ def set_setting(auto_delete=None, delete_seconds=None, protect_content=None):
         cur.execute("UPDATE settings SET delete_seconds = ? WHERE id = 1", (int(delete_seconds),))
     if protect_content is not None:
         cur.execute("UPDATE settings SET protect_content = ? WHERE id = 1", (1 if protect_content else 0,))
-    conn.commit(); conn.close()
-
-# verify settings getters/setters
-def get_verify_settings():
-    conn = get_conn(); cur = conn.cursor()
-    cur.execute("SELECT verify1_enabled, verify1_shortener_template, verify1_api_key, verify2_enabled, verify2_shortener_template, verify2_api_key, verify2_delay_seconds FROM verify_settings WHERE id = 1")
-    row = cur.fetchone(); conn.close()
-    return {
-        "verify1_enabled": bool(row[0]),
-        "verify1_shortener_template": row[1] or "",
-        "verify1_api_key": row[2] or "",
-        "verify2_enabled": bool(row[3]),
-        "verify2_shortener_template": row[4] or "",
-        "verify2_api_key": row[5] or "",
-        "verify2_delay_seconds": int(row[6] or 60)
-    }
-
-def set_verify_settings(**kwargs):
-    conn = get_conn(); cur = conn.cursor()
-    allowed = ["verify1_enabled","verify1_shortener_template","verify1_api_key","verify2_enabled","verify2_shortener_template","verify2_api_key","verify2_delay_seconds"]
-    for k,v in kwargs.items():
-        if k in allowed:
-            cur.execute(f"UPDATE verify_settings SET {k} = ? WHERE id = 1", (1 if (k.endswith("_enabled") and v) else v,))
     conn.commit(); conn.close()
 
 # -------------------------
@@ -283,36 +246,10 @@ async def reschedule_all():
             log.info("Removed expired file at startup %s", code)
 
 # -------------------------
-# Verification: in-memory user+code verified map (short-lived)
+# NOTE: All verification button logic (verify1/verify2/shortener/etc.)
+# has been removed from this file as requested. No verify handlers,
+# verify maps or verify-related DB usage remain.
 # -------------------------
-# key: (user_id, code) -> timestamp of verify1 success
-verified_stage1 = {}   # (user_id, code) -> ts
-verified_stage2 = {}   # (user_id, code) -> ts
-
-# helper to call shortener API (expects JSON with {"short":"..."} by default)
-async def call_shortener(template: str, api_key: str, target_url: str) -> Optional[str]:
-    if not template:
-        return None
-    try:
-        url = template.format(api_key=api_key, url=target_url)
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get(url, timeout=10) as resp:
-                text = await resp.text()
-                # try parse JSON
-                try:
-                    j = json.loads(text)
-                    # common fields: "short", "short_url", "result"
-                    for k in ("short","short_url","url","result"):
-                        if k in j and isinstance(j[k], str) and j[k].startswith("http"):
-                            return j[k]
-                except Exception:
-                    # fallback: if raw text looks like http...
-                    m = re.search(r'https?://\S+', text)
-                    if m:
-                        return m.group(0)
-    except Exception:
-        log.exception("Shortener call failed")
-    return None
 
 # -------------------------
 # Handlers: /start, deep link, settings
@@ -323,14 +260,12 @@ async def start_handler(event):
     if not arg:
         await ensure_username()
         s = get_settings()
-        v = get_verify_settings()
         text = (
             "👋 **Welcome to Pro FileStore Bot**\n\n"
             "📦 Send any file (or forward) and I'll generate a permanent share link.\n"
             f"🔒 Auto-delete: **{'ON' if s['auto_delete_enabled'] else 'OFF'}**\n"
             f"⏳ Delete after: **{human_seconds(s['delete_seconds'])}**\n"
             f"🚫 Forward protection: **{'ON' if s['protect_content'] else 'OFF'}**\n\n"
-            f"🔐 Verify1: {'ON' if v['verify1_enabled'] else 'OFF'}  |  Verify2: {'ON' if v['verify2_enabled'] else 'OFF'}\n\n"
             "Admin commands: /setautodelete, /setforward, /settings"
         )
         buttons = [
@@ -349,61 +284,8 @@ async def start_handler(event):
             return
         _, owner_id, file_id, file_name, caption, file_type, created_at, delete_at, reply_chat_id, reply_msg_id = rec
         s = get_settings()
-        v = get_verify_settings()
 
-        # If verify1 enabled and user hasn't completed stage1 for this code -> show verify menu
-        user = await event.get_sender()
-        uid = user.id if user else event.sender_id
-        key1 = (uid, code)
-        if v["verify1_enabled"] and key1 not in verified_stage1:
-            # prepare shortener button (if template set)
-            await ensure_username()
-            deep_verify_payload = f"verify1|{code}"
-            btns = []
-            # inline verify button (internal)
-            btns.append([Button.inline("✅ Verify (bot)", f"verify1|{code}")])
-            # if shortener template exists, create short link to this bot's deep verify callback URL (t.me link)
-            if v["verify1_shortener_template"]:
-                try:
-                    target = f"https://t.me/{BOT_USERNAME}?start={deep_verify_payload}"
-                    short = await call_shortener(v["verify1_shortener_template"], v["verify1_api_key"], target)
-                    if short:
-                        btns.append([Button.url("🌐 Verify via short link", short)])
-                except Exception:
-                    pass
-            btns.append([Button.inline("⬅ Back", b"back")])
-            text = (
-                "🔐 **Verify 1 required**\n\n"
-                "You must complete the verification step before getting the file.\n"
-                "You can either press **Verify (bot)** or use the external shortener link if provided by admin."
-            )
-            await event.respond(text, buttons=btns, link_preview=False)
-            return
-
-        # If verify1 passed and verify2 enabled and not yet verified stage2 -> ask for verify2
-        key2 = (uid, code)
-        if v["verify2_enabled"] and key1 in verified_stage1 and key2 not in verified_stage2:
-            # show verify2 menu
-            await ensure_username()
-            btns = [[Button.inline("✅ Complete Verify 2 (bot)", f"verify2|{code}")]]
-            if v["verify2_shortener_template"]:
-                try:
-                    target = f"https://t.me/{BOT_USERNAME}?start=verify2|{code}"
-                    short = await call_shortener(v["verify2_shortener_template"], v["verify2_api_key"], target)
-                    if short:
-                        btns.append([Button.url("🌐 Verify2 via short link", short)])
-                except Exception:
-                    pass
-            btns.append([Button.inline("⬅ Back", b"back")])
-            text = (
-                "🔐 **Verify 2 required**\n\n"
-                f"Second verification step is enabled. You must complete it to receive the file.\n"
-                f"Verify2 wait time: {human_seconds(v['verify2_delay_seconds'])} (admin-set)\n"
-            )
-            await event.respond(text, buttons=btns, link_preview=False)
-            return
-
-        # Passed verification (or verification not required) -> send file
+        # Directly send file (no verification step)
         try:
             file_msg = await client.send_file(event.sender_id, file=file_id, caption=caption or file_name, force_document=False, allow_cache=True, supports_streaming=True, protect_content=bool(s["protect_content"]))
         except Exception:
@@ -428,7 +310,7 @@ async def start_handler(event):
     await event.respond("Unknown start parameter. Send a file to generate a link.")
 
 # -------------------------
-# Callbacks: verify buttons & menus & admin verify config pages
+# Callbacks: admin and other buttons (verify-related buttons removed)
 # -------------------------
 @client.on(events.CallbackQuery)
 async def callback_handler(event):
@@ -438,7 +320,6 @@ async def callback_handler(event):
 
     # Back button (return to main menu)
     if data == "back":
-        s = get_settings()
         await ensure_username()
         text = (
             "👋 **Welcome back!**\n\n"
@@ -448,203 +329,27 @@ async def callback_handler(event):
         await event.edit(text, buttons=btns)
         return
 
-    # Verify1 internal button: "verify1|<code>"
-    if data.startswith("verify1|"):
-        _, code = data.split("|",1)
-        # mark verified for this user+code
-        verified_stage1[(uid, code)] = int(time.time())
-        await event.answer("✅ Verify1 completed. Sending file...", alert=True)
-        # emulate /start file_code flow for same user by calling send handler logic
-        # craft a fake event to call send logic, but easier: send a message to user telling them to click the original link again
-        # Simpler: directly send file here if code exists
-        rec = get_file_record(code)
-        if not rec:
-            await event.answer("File not found.", alert=True)
-            return
-        _, owner_id, file_id, file_name, caption, file_type, created_at, delete_at, reply_chat_id, reply_msg_id = rec
-        s = get_settings()
-        try:
-            file_msg = await client.send_file(uid, file=file_id, caption=caption or file_name, force_document=False, allow_cache=True, supports_streaming=True, protect_content=bool(s["protect_content"]))
-        except Exception:
-            log.exception("Failed to send file in verify1 callback for %s", code)
-            await event.answer("Failed to send file. Try again later.", alert=True)
-            return
-        # schedule per-download deletion if needed
-        if delete_at:
-            now = int(time.time())
-            remaining = delete_at - now
-            if remaining > 0:
-                notice_text = f"⏳ This file will auto-delete in {human_seconds(remaining)}. Please forward/save now if you need it."
-                try:
-                    notice_msg = await client.send_message(uid, notice_text, reply_to=file_msg.id)
-                    extra = [(uid, file_msg.id), (uid, notice_msg.id)]
-                    await schedule_delete(code, delete_at, extra_messages=extra)
-                except Exception:
-                    log.exception("Failed to send notice or schedule per-download delete for %s", code)
-        return
-
-    # Verify2 internal button: "verify2|<code>"
-    if data.startswith("verify2|"):
-        _, code = data.split("|",1)
-        verified_stage2[(uid, code)] = int(time.time())
-        await event.answer("✅ Verify2 completed. Sending file...", alert=True)
-        rec = get_file_record(code)
-        if not rec:
-            await event.answer("File not found.", alert=True)
-            return
-        _, owner_id, file_id, file_name, caption, file_type, created_at, delete_at, reply_chat_id, reply_msg_id = rec
-        s = get_settings()
-        try:
-            file_msg = await client.send_file(uid, file=file_id, caption=caption or file_name, force_document=False, allow_cache=True, supports_streaming=True, protect_content=bool(s["protect_content"]))
-        except Exception:
-            log.exception("Failed to send file in verify2 callback for %s", code)
-            await event.answer("Failed to send file. Try again later.", alert=True)
-            return
-        # schedule per-download deletion if needed
-        if delete_at:
-            now = int(time.time())
-            remaining = delete_at - now
-            if remaining > 0:
-                notice_text = f"⏳ This file will auto-delete in {human_seconds(remaining)}. Please forward/save now if you need it."
-                try:
-                    notice_msg = await client.send_message(uid, notice_text, reply_to=file_msg.id)
-                    extra = [(uid, file_msg.id), (uid, notice_msg.id)]
-                    await schedule_delete(code, delete_at, extra_messages=extra)
-                except Exception:
-                    log.exception("Failed to send notice or schedule per-download delete for %s", code)
-        return
-
-    # Admin panel and verify management pages
+    # Admin panel (verify buttons removed)
     if data == "admin_panel":
         if not is_admin(uid):
             await event.answer("Admin only", alert=True)
             return
-        s = get_settings(); v = get_verify_settings()
+        s = get_settings()
         text = (
             "⚙️ Admin Panel\n\n"
             f"Auto-delete: {'ON' if s['auto_delete_enabled'] else 'OFF'}\n"
             f"Delete after: {human_seconds(s['delete_seconds'])}\n"
             f"Protect content: {'ON' if s['protect_content'] else 'OFF'}\n\n"
-            f"Verify1: {'ON' if v['verify1_enabled'] else 'OFF'}\n"
-            f"Verify2: {'ON' if v['verify2_enabled'] else 'OFF'}\n\n"
-            "Use the buttons below to manage verify settings and shorteners."
+            "Use the buttons below to manage settings."
         )
         buttons = [
             [Button.inline("Toggle Auto-delete", b"toggle_autodel_btn"), Button.inline("Toggle Protect", b"toggle_protect_btn")],
-            [Button.inline("Verify Settings", b"verify_panel")],
             [Button.inline("⬅ Back", b"back")]
         ]
         await event.edit(text, buttons=buttons)
         return
 
-    if data == "verify_panel":
-        if not is_admin(uid):
-            await event.answer("Admin only", alert=True)
-            return
-        v = get_verify_settings()
-        text = (
-            "**ʜᴇʀᴇ ʏᴏᴜ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ᴠᴇʀɪꜰɪᴄᴀᴛɪᴏɴ ᴘʀᴏᴄᴇꜱꜱ, ᴍᴇᴀɴꜱ ʏᴏᴜ ᴄᴀɴ ᴅᴏ ᴛᴜʀɴ ᴏɴ/ᴏꜰꜰ & ꜱᴇᴛ ᴛɪᴍᴇ ꜰᴏʀ 2ɴᴅ ᴠᴇʀɪꜰɪᴄᴀᴛɪᴏɴ ᴀɴᴅ ᴀʟsᴏ sʜᴏʀᴛɴᴇʀs ꜰᴏʀ ᴠᴇʀɪꜰʏ.**"
-        )
-        buttons = [
-            [Button.inline("Verify 1", b"verify1_page"), Button.inline("Verify 2", b"verify2_page")],
-            [Button.inline("Set Verify 2 Time", b"set_verify2_time")],
-            [Button.inline("⬅ Back", b"admin_panel")]
-        ]
-        await event.edit(text, buttons=buttons)
-        return
-
-    # Verify1 page
-    if data == "verify1_page":
-        if not is_admin(uid):
-            await event.answer("Admin only", alert=True)
-            return
-        v = get_verify_settings()
-        text = (
-            "**ᴠᴇʀɪꜰʏ 𝟷 ꜱᴇᴛᴛɪɴɢꜱ: ɢᴇɴᴇʀᴀʟ**\n\n"
-            f"Shortener: {'SET' if v['verify1_shortener_template'] else 'NOT SET'}\n"
-            f"API Key: {'SET' if v['verify1_api_key'] else 'NOT SET'}\n"
-            f"Status: {'ON' if v['verify1_enabled'] else 'OFF'}\n\n"
-            "Use buttons below to toggle or set shortener/template."
-        )
-        buttons = [
-            [Button.inline("Turn Verify1 ON/OFF", b"toggle_verify1_btn")],
-            [Button.inline("Set Verify1 Shortener Template", b"set_verify1_short"), Button.inline("Set Verify1 API Key", b"set_verify1_key")],
-            [Button.inline("⬅ Back", b"verify_panel")]
-        ]
-        await event.edit(text, buttons=buttons)
-        return
-
-    # Verify2 page
-    if data == "verify2_page":
-        if not is_admin(uid):
-            await event.answer("Admin only", alert=True)
-            return
-        v = get_verify_settings()
-        text = (
-            "**ᴠᴇʀɪꜰʏ 𝟸 ꜱᴇᴛᴛɪɴɢꜱ:**\n\n"
-            f"Shortener: {'SET' if v['verify2_shortener_template'] else 'NOT SET'}\n"
-            f"API Key: {'SET' if v['verify2_api_key'] else 'NOT SET'}\n"
-            f"Status: {'ON' if v['verify2_enabled'] else 'OFF'}\n"
-            f"Verify2 delay: {human_seconds(v['verify2_delay_seconds'])}\n\n"
-            "Use buttons below to toggle or set shortener/template or set delay."
-        )
-        buttons = [
-            [Button.inline("Turn Verify2 ON/OFF", b"toggle_verify2_btn")],
-            [Button.inline("Set Verify2 Shortener Template", b"set_verify2_short"), Button.inline("Set Verify2 API Key", b"set_verify2_key")],
-            [Button.inline("⬅ Back", b"verify_panel")]
-        ]
-        await event.edit(text, buttons=buttons)
-        return
-
-    # Set verify2 time page
-    if data == "set_verify2_time":
-        if not is_admin(uid):
-            await event.answer("Admin only", alert=True)
-            return
-        text = (
-            "ʜᴇʀᴇ ʏᴏᴜ ᴄᴀɴ ᴍᴀɴᴀɢᴇ ʏᴏᴜʀ ɢʀᴏᴜᴘ 2ɴᴅ ᴠᴇʀɪꜰɪᴄᴀᴛɪᴏɴ ᴛɪᴍᴇ\n\n"
-            "Set Verify2 time (example: `60s`, `2m`, `1h`)\n\n"
-            "Use command: /setverify2time <duration>\n\n"
-            "⬅ Back"
-        )
-        buttons = [[Button.inline("⬅ Back", b"verify_panel")]
-        ]
-        await event.edit(text, buttons=buttons)
-        return
-
-    # Toggle verify1
-    if data == "toggle_verify1_btn":
-        if not is_admin(uid):
-            await event.answer("Admin only", alert=True)
-            return
-        v = get_verify_settings()
-        new = not v["verify1_enabled"]
-        set_verify_settings(verify1_enabled=1 if new else 0)
-        await event.edit(f"Verify1 is now {'ON' if new else 'OFF'}.", buttons=[[Button.inline("⬅ Back", b"verify1_page")]])
-        return
-
-    # Toggle verify2
-    if data == "toggle_verify2_btn":
-        if not is_admin(uid):
-            await event.answer("Admin only", alert=True)
-            return
-        v = get_verify_settings()
-        new = not v["verify2_enabled"]
-        set_verify_settings(verify2_enabled=1 if new else 0)
-        await event.edit(f"Verify2 is now {'ON' if new else 'OFF'}.", buttons=[[Button.inline("⬅ Back", b"verify2_page")]])
-        return
-
-    # Buttons to set shortener templates / keys - these will ask the admin to send the template/key as a message next
-    if data in ("set_verify1_short","set_verify1_key","set_verify2_short","set_verify2_key"):
-        if not is_admin(uid):
-            await event.answer("Admin only", alert=True)
-            return
-        await event.edit("✅ Now send the template (or key) as a plain message in this chat. Use `{api_key}` and `{url}` placeholders in the template. Example:\n`https://api.short.example/create?api_key={api_key}&url={url}`\n\nSend `cancel` to abort.", buttons=[[Button.inline("⬅ Back", b"verify_panel")]])
-        # store a small marker in-memory to know next message is template/key
-        pending_setter[uid] = data  # will be handled in message handler
-        return
-
-    # inline toggle auto-delete / protect buttons
+    # Toggle auto-delete / protect
     if data == "toggle_autodel_btn":
         if not is_admin(uid):
             await event.answer("Admin only", alert=True)
@@ -708,7 +413,7 @@ async def callback_handler(event):
 # -------------------------
 # Pending setter dict (admin sending templates/keys)
 # -------------------------
-# uid -> pending action name like 'set_verify1_short'
+# uid -> pending action name like 'set_verify1_short' (kept for potential other uses)
 pending_setter = {}
 
 # handle admin sending the template or api key after pressing set button
@@ -723,22 +428,8 @@ async def handle_pending_setters(event):
     if text.lower() == "cancel":
         await event.reply("Cancelled.")
         return
-    if action == "set_verify1_short":
-        set_verify_settings(verify1_shortener_template=text)
-        await event.reply("✅ Verify1 shortener template saved.")
-        return
-    if action == "set_verify1_key":
-        set_verify_settings(verify1_api_key=text)
-        await event.reply("✅ Verify1 API key saved.")
-        return
-    if action == "set_verify2_short":
-        set_verify_settings(verify2_shortener_template=text)
-        await event.reply("✅ Verify2 shortener template saved.")
-        return
-    if action == "set_verify2_key":
-        set_verify_settings(verify2_api_key=text)
-        await event.reply("✅ Verify2 API key saved.")
-        return
+    # currently no specific pending actions implemented; keep placeholder responses
+    await event.reply("Received. (No verify-related settings are used in this bot.)")
 
 # -------------------------
 # Admin commands (text) for verify time and basic settings
@@ -754,8 +445,8 @@ async def cmd_setverify2time(event):
     if sec is None:
         await event.reply("Invalid duration. Use like `30s`, `2m`, `1h`, `1d`.")
         return
-    set_verify_settings(verify2_delay_seconds=sec)
-    await event.reply(f"✅ Verify2 delay set to {human_seconds(sec)}.")
+    # No verify2 in this bot; acknowledge but do not store
+    await event.reply("✅ Note received — verification features have been removed from this bot.")
 
 # -------------------------
 # Admin commands: setautodelete, setforward, settings, myfiles (text versions)
@@ -795,19 +486,16 @@ async def cmd_setforward(event):
 @client.on(events.NewMessage(pattern=r"^/settings$"))
 async def cmd_settings(event):
     sender = await event.get_sender()
-    s = get_settings(); v = get_verify_settings()
+    s = get_settings()
     text = (
         f"⚙️ Settings\n\n"
         f"• Auto-delete: {'ON' if s['auto_delete_enabled'] else 'OFF'}\n"
         f"• Delete after: {human_seconds(s['delete_seconds'])}\n"
         f"• Protect content: {'ON' if s['protect_content'] else 'OFF'}\n\n"
-        f"🔐 Verify1: {'ON' if v['verify1_enabled'] else 'OFF'}  Short: {'SET' if v['verify1_shortener_template'] else 'NOT SET'}\n"
-        f"🔐 Verify2: {'ON' if v['verify2_enabled'] else 'OFF'}  Short: {'SET' if v['verify2_shortener_template'] else 'NOT SET'}  Delay: {human_seconds(v['verify2_delay_seconds'])}\n\n"
         "Use inline buttons below to manage settings."
     )
     buttons = [
         [Button.inline("Toggle Auto-delete", b"toggle_autodel_btn"), Button.inline("Toggle Protect", b"toggle_protect_btn")],
-        [Button.inline("Verify Settings", b"verify_panel")],
         [Button.inline("⬅ Back", b"back")]
     ]
     await event.reply(text, buttons=buttons)
@@ -833,7 +521,6 @@ async def cmd_myfiles(event):
 # -------------------------
 @client.on(events.NewMessage(incoming=True))
 async def handle_incoming(event):
-    # first handle pending_setter messages (admin shortener templates) - this is done in separate handler above
     # if message has file, process saving
     msg = event.message
     if not msg or not getattr(msg, "file", None):
