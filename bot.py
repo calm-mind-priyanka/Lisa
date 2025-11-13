@@ -326,39 +326,63 @@ async def reschedule_all():
 
 # -------------------------
 # Verification: in-memory user+code verified map (short-lived)
-# -------------------------
 # key: (user_id, code) -> timestamp
 verified_stage1 = {}   # (user_id, code) -> ts
 verified_stage2 = {}   # (user_id, code) -> ts
 
 # helper to call shortener API (expects JSON with {"short":"..."} by default or raw http in response)
 async def call_shortener(template: str, api_key: str, target_url: str) -> Optional[str]:
+    """
+    template: either a raw template that contains {api_key} and {url} (admin/user can set)
+              OR a domain like 'tnlinks.in' (user-friendly). If domain is provided,
+              we attempt a few common patterns:
+                - https://{domain}/create?api_key={api_key}&url={url}
+                - https://{domain}/api?key={api_key}&url={url}
+              If a full template is provided containing '{url}', we use it directly.
+    """
     if not template:
         return None
-    try:
-        url = template.format(api_key=api_key, url=target_url)
-        async with aiohttp.ClientSession() as sess:
-            async with sess.get(url, timeout=12) as resp:
-                text = await resp.text()
-                # try parse JSON
-                try:
-                    j = json.loads(text)
-                    for k in ("short","short_url","url","result"):
-                        if k in j and isinstance(j[k], str) and j[k].startswith("http"):
-                            return j[k]
-                except Exception:
-                    # fallback: if raw text looks like http...
-                    m = re.search(r'https?://\S+', text)
-                    if m:
-                        return m.group(0)
-    except Exception:
-        log.exception("Shortener call failed")
+    # if template looks like a short domain (no {url}), try to build a couple of sensible variants
+    if "{url}" not in template and "http" not in template:
+        # template is likely a domain like tnlinks.in or nowshort.com
+        domain = template.strip().rstrip('/')
+        patterns = [
+            f"https://{domain}/create?api_key={{api_key}}&url={{url}}",
+            f"https://{domain}/api?key={{api_key}}&url={{url}}",
+            f"https://{domain}/shorten?api_key={{api_key}}&url={{url}}",
+            f"https://{domain}/?api_key={{api_key}}&url={{url}}"
+        ]
+    else:
+        patterns = [template]
+
+    for p in patterns:
+        try:
+            url = p.format(api_key=api_key, url=target_url)
+            async with aiohttp.ClientSession() as sess:
+                async with sess.get(url, timeout=12) as resp:
+                    text = await resp.text()
+                    # try parse JSON
+                    try:
+                        j = json.loads(text)
+                        for k in ("short","short_url","url","result"):
+                            if k in j and isinstance(j[k], str) and j[k].startswith("http"):
+                                return j[k]
+                    except Exception:
+                        # fallback: if raw text looks like http...
+                        m = re.search(r'https?://\S+', text)
+                        if m:
+                            return m.group(0)
+        except Exception:
+            log.debug("Shortener attempt failed for pattern %s", p)
+            continue
+    log.warning("All shortener attempts failed for template=%s", template)
     return None
 
 # -------------------------
 # Pending setter dict (user -> action)
+# The value is a dict: {"action": str, "meta": optional}
 # -------------------------
-pending_setter = {}  # user_id -> action like 'SET_VERIFY1_SHORT'
+pending_setter = {}  # user_id -> {"action": "...", "meta": {...}}
 
 # -------------------------
 # Handlers: /start, deep link, settings
@@ -554,7 +578,7 @@ async def callback_handler(event):
             buttons=[[Button.inline("⬅ BACK", b"verify_panel")]]
         )
         # register pending setter for user
-        pending_setter[uid] = "SET_VERIFY2_TIME"
+        pending_setter[uid] = {"action": "SET_VERIFY2_TIME"}
         return
 
     # Toggle verify1 for user
@@ -582,13 +606,21 @@ async def callback_handler(event):
     if data in ("set_verify1_short", "set_verify1_key", "set_verify2_short", "set_verify2_key"):
         # Prompt the user to send the template/key as a message
         label_map = {
-            "set_verify1_short": "SEND VERIFY1 SHORTENER TEMPLATE (USE {api_key} AND {url}). EXAMPLE: https://api.short.example/create?api_key={api_key}&url={url}",
+            "set_verify1_short": "SEND VERIFY1 SHORTENER DOMAIN OR TEMPLATE. EXAMPLE DOMAIN: tnlinks.in  (I WILL ASK FOR API KEY NEXT).",
             "set_verify1_key": "SEND VERIFY1 API KEY (OR SEND CANCEL).",
-            "set_verify2_short": "SEND VERIFY2 SHORTENER TEMPLATE (USE {api_key} AND {url}).",
+            "set_verify2_short": "SEND VERIFY2 SHORTENER DOMAIN OR TEMPLATE.",
             "set_verify2_key": "SEND VERIFY2 API KEY (OR SEND CANCEL)."
         }
         await event.edit("✅ " + label_map[data] + "\n\nSEND 'CANCEL' TO ABORT.", buttons=[[Button.inline("⬅ BACK", b"verify_panel")]])
-        pending_setter[uid] = data.upper()  # store in uppercase tag
+        # store pending action; use meta to allow domain→key multi-step
+        if data == "set_verify1_short":
+            pending_setter[uid] = {"action": "SET_VERIFY1_SHORT_WAIT_KEY", "meta": {}}
+        elif data == "set_verify1_key":
+            pending_setter[uid] = {"action": "SET_VERIFY1_KEY"}
+        elif data == "set_verify2_short":
+            pending_setter[uid] = {"action": "SET_VERIFY2_SHORT_WAIT_KEY", "meta": {}}
+        elif data == "set_verify2_key":
+            pending_setter[uid] = {"action": "SET_VERIFY2_KEY"}
         return
 
     # VERIFY (inline) - user clicking verify button on file flow
@@ -718,8 +750,8 @@ async def callback_handler(event):
     if data in admin_set_map:
         if not is_admin(uid):
             await event.answer("ADMIN ONLY", alert=True); return
-        await event.edit("✅ SEND THE TEMPLATE/KEY AS PLAIN MESSAGE (USE {api_key} AND {url}). SEND 'CANCEL' TO ABORT.", buttons=[[Button.inline("⬅ BACK", b"verify_panel_global")]])
-        pending_setter[uid] = admin_set_map[data]
+        await event.edit("✅ SEND THE TEMPLATE/KEY OR DOMAIN AS PLAIN MESSAGE (I WILL ASK FOR API KEY NEXT IF NEEDED). SEND 'CANCEL' TO ABORT.", buttons=[[Button.inline("⬅ BACK", b"verify_panel_global")]])
+        pending_setter[uid] = {"action": admin_set_map[data], "meta": {}}
         return
 
     # Inline toggle auto-delete / protect buttons (admin)
@@ -790,29 +822,49 @@ async def handle_pending_setters(event):
     uid = sender.id if sender else event.sender_id
     if uid not in pending_setter:
         return  # not in setter flow
-    action = pending_setter.pop(uid)
+    entry = pending_setter.pop(uid)
+    action = entry.get("action")
+    meta = entry.get("meta", {})
     text = (event.raw_text or "").strip()
     if text.lower() == "cancel":
         await event.reply("CANCELLED.")
         return
 
-    # USER actions (uppercase markers set earlier)
-    if action == "SET_VERIFY1_SHORT":
-        set_user_verify_settings(uid, verify1_shortener_template=text)
-        await event.reply("✅ VERIFY1 SHORTENER TEMPLATE SAVED.")
+    # USER actions (we used uppercase action names earlier)
+    if action == "SET_VERIFY1_SHORT_WAIT_KEY":
+        # first step: user sent domain/template; store then ask for API key
+        domain_or_template = text
+        pending_setter[uid] = {"action": "SET_VERIFY1_SHORT_FINAL", "meta": {"template": domain_or_template}}
+        await event.reply("✅ RECEIVED. NOW SEND VERIFY1 API KEY (OR SEND CANCEL).")
+        return
+    if action == "SET_VERIFY1_SHORT_FINAL":
+        template = meta.get("template") or ""
+        api_key = text
+        # persist both to user settings
+        set_user_verify_settings(uid, verify1_shortener_template=template, verify1_api_key=api_key)
+        await event.reply("✅ VERIFY1 SHORTENER TEMPLATE AND API KEY SAVED.")
         return
     if action == "SET_VERIFY1_KEY":
         set_user_verify_settings(uid, verify1_api_key=text)
         await event.reply("✅ VERIFY1 API KEY SAVED.")
         return
-    if action == "SET_VERIFY2_SHORT":
-        set_user_verify_settings(uid, verify2_shortener_template=text)
-        await event.reply("✅ VERIFY2 SHORTENER TEMPLATE SAVED.")
+
+    if action == "SET_VERIFY2_SHORT_WAIT_KEY":
+        domain_or_template = text
+        pending_setter[uid] = {"action": "SET_VERIFY2_SHORT_FINAL", "meta": {"template": domain_or_template}}
+        await event.reply("✅ RECEIVED. NOW SEND VERIFY2 API KEY (OR SEND CANCEL).")
+        return
+    if action == "SET_VERIFY2_SHORT_FINAL":
+        template = meta.get("template") or ""
+        api_key = text
+        set_user_verify_settings(uid, verify2_shortener_template=template, verify2_api_key=api_key)
+        await event.reply("✅ VERIFY2 SHORTENER TEMPLATE AND API KEY SAVED.")
         return
     if action == "SET_VERIFY2_KEY":
         set_user_verify_settings(uid, verify2_api_key=text)
         await event.reply("✅ VERIFY2 API KEY SAVED.")
         return
+
     if action == "SET_VERIFY2_TIME":
         sec = parse_duration(text)
         if sec is None:
@@ -822,25 +874,38 @@ async def handle_pending_setters(event):
         await event.reply(f"✅ VERIFY2 DELAY SET TO {human_seconds(sec)}.")
         return
 
-    # ADMIN actions (global)
+    # ADMIN (global) actions
     if action == "SET_VERIFY1_SHORT_GLOBAL" and is_admin(uid):
-        set_verify_settings(verify1_shortener_template=text)
-        await event.reply("✅ GLOBAL VERIFY1 SHORTENER TEMPLATE SAVED.")
+        # admin provided domain/template; ask for key next
+        pending_setter[uid] = {"action": "SET_VERIFY1_SHORT_GLOBAL_FINAL", "meta": {"template": text}}
+        await event.reply("✅ RECEIVED GLOBAL TEMPLATE. NOW SEND GLOBAL VERIFY1 API KEY (OR SEND CANCEL).")
+        return
+    if action == "SET_VERIFY1_SHORT_GLOBAL_FINAL" and is_admin(uid):
+        template = meta.get("template") or ""
+        api_key = text
+        set_verify_settings(verify1_shortener_template=template, verify1_api_key=api_key)
+        await event.reply("✅ GLOBAL VERIFY1 SHORTENER TEMPLATE AND API KEY SAVED.")
         return
     if action == "SET_VERIFY1_KEY_GLOBAL" and is_admin(uid):
         set_verify_settings(verify1_api_key=text)
         await event.reply("✅ GLOBAL VERIFY1 API KEY SAVED.")
         return
+
     if action == "SET_VERIFY2_SHORT_GLOBAL" and is_admin(uid):
-        set_verify_settings(verify2_shortener_template=text)
-        await event.reply("✅ GLOBAL VERIFY2 SHORTENER TEMPLATE SAVED.")
+        pending_setter[uid] = {"action": "SET_VERIFY2_SHORT_GLOBAL_FINAL", "meta": {"template": text}}
+        await event.reply("✅ RECEIVED GLOBAL TEMPLATE. NOW SEND GLOBAL VERIFY2 API KEY (OR SEND CANCEL).")
+        return
+    if action == "SET_VERIFY2_SHORT_GLOBAL_FINAL" and is_admin(uid):
+        template = meta.get("template") or ""
+        api_key = text
+        set_verify_settings(verify2_shortener_template=template, verify2_api_key=api_key)
+        await event.reply("✅ GLOBAL VERIFY2 SHORTENER TEMPLATE AND API KEY SAVED.")
         return
     if action == "SET_VERIFY2_KEY_GLOBAL" and is_admin(uid):
         set_verify_settings(verify2_api_key=text)
         await event.reply("✅ GLOBAL VERIFY2 API KEY SAVED.")
         return
 
-    # fallback
     await event.reply("RECEIVED. (NO ACTION APPLIED)")
 
 # -------------------------
