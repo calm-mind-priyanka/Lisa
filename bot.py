@@ -1,5 +1,5 @@
 import os, asyncio, uuid
-from telethon import TelegramClient, events, Button
+from telethon import TelegramClient, events, Button, functions, errors
 
 # --- CONFIGURATION ---
 API_ID = 1234567  
@@ -13,100 +13,131 @@ client = TelegramClient('VJ_FileStore', API_ID, API_HASH).start(bot_token=BOT_TO
 DB = {
     "config": {
         "protect": False, "auto_delete": False, "del_time": 60,
-        "shortner": "OFF ❌", "short_url": None, "short_api": None,
-        "caption": "✨ **{filename}**", "token_verify": "OFF ❌",
-        "fsub": "OFF ❌"
+        "shortner": "OFF ❌", "short_url": None, 
+        "caption": "✨ **{filename}**", 
+        "fsub": "OFF ❌",
+        "fsub_channels": [] # List of Channel IDs
     },
     "files": {}, 
     "states": {} 
 }
 
-# --- UI GENERATORS ---
+# --- HELPERS ---
+async def get_unsubscribed_channels(user_id):
+    """Returns a list of channel IDs the user hasn't joined yet."""
+    c = DB["config"]
+    if c["fsub"] == "OFF ❌" or not c["fsub_channels"]: 
+        return []
+    
+    unsubscribed = []
+    for channel_id in c["fsub_channels"]:
+        try:
+            await client(functions.channels.GetParticipantRequest(int(channel_id), user_id))
+        except (errors.UserNotParticipantError, ValueError):
+            unsubscribed.append(channel_id)
+        except Exception:
+            continue 
+    return unsubscribed
+
 def settings_btns():
     c = DB["config"]
     return [
         [Button.url("🤖 MY CLONE BOT", "https://t.me/botfather")],
-        [Button.inline("💸 PREMIUM PLAN", b"premium")],
         [Button.inline("🔗 LINK SHORTNER", b"short_menu")],
-        [Button.inline(f"⏰ TOKEN VERIFICATION [{c['token_verify']}]", b"token_menu")],
-        [Button.inline("🍿 CUSTOM CAPTION", b"cap_menu")],
-        [Button.inline(f"📢 CUSTOM FORCE SUBSCRIBE [{c['fsub']}]", b"fsub_menu")],
-        [Button.inline("🔘 CUSTOM BUTTON", b"btn_menu")],
-        [Button.inline(f"♻️ AUTO DELETE [{'✅' if c['auto_delete'] else '❌'}]", b"toggle_del")],
+        [Button.inline(f"📢 MULTI FSUB [{c['fsub']}]", b"fsub_config")],
         [Button.inline(f"🔒 PROTECT CONTENT [{'✅' if c['protect'] else '❌'}]", b"toggle_prot")],
         [Button.inline("⬅️ BACK", b"home")]
     ]
 
-# --- CALLBACK HANDLER ---
+# --- HANDLERS ---
+
 @client.on(events.CallbackQuery)
 async def cb_handler(event):
     data = event.data
     uid = event.sender_id
     c = DB["config"]
 
-    if data == b"settings":
-        await event.edit("**HERE IS THE SETTINGS MENU**", buttons=settings_btns())
+    if uid != ADMIN_ID: return
 
-    # --- SHORTENER LOGIC ---
-    elif data == b"short_menu":
-        text = f"**MANAGE SHORTNER**\n\n**SHORTLINK - {c['shortner']}**\n{'URL: ' + c['short_url'] if c['short_url'] else 'No URL set.'}"
-        btns = [[Button.inline("SET SHORTLINK", b"set_sl"), Button.inline("DELETE", b"del_sl")], [Button.inline("⬅️ BACK", b"settings")]]
+    if data == b"settings":
+        await event.edit("**SETTINGS MENU**", buttons=settings_btns())
+
+    # --- MULTI FSUB CONFIG MENU ---
+    elif data == b"fsub_config":
+        channels_str = "\n".join([f"• `{id}`" for id in c['fsub_channels']]) if c['fsub_channels'] else "None"
+        text = (
+            "**📢 MULTI FORCE SUBSCRIBE SETTINGS**\n\n"
+            f"**STATUS:** {c['fsub']}\n"
+            f"**CHANNELS:**\n{channels_str}\n\n"
+            "Bot must be Admin in all these channels!"
+        )
+        btns = [
+            [Button.inline("➕ ADD CHANNEL ID", b"add_fsub"), Button.inline("🗑️ CLEAR ALL", b"clear_fsub")],
+            [Button.inline(f"{'ON' if 'OFF' in c['fsub'] else 'OFF'} FSUB", b"toggle_fsub")],
+            [Button.inline("⬅️ BACK", b"settings")]
+        ]
         await event.edit(text, buttons=btns)
 
-    elif data == b"set_sl":
-        DB["states"][uid] = "waiting_url"
-        await event.edit("**SEND URL (vjlink.online format)...**\n\n**/cancel TO STOP**")
+    elif data == b"add_fsub":
+        DB["states"][uid] = "waiting_fsub"
+        await event.edit("**SEND THE CHANNEL ID TO ADD...**\n\nExample: `-100123456789`\n\n**/cancel - CANCEL**")
 
-    # --- CAPTION LOGIC ---
-    elif data == b"cap_menu":
-        DB["states"][uid] = "waiting_caption"
-        await event.edit(f"**CURRENT CAPTION:**\n`{c['caption']}`\n\n**SEND NEW CAPTION TEXT...**")
+    elif data == b"clear_fsub":
+        c['fsub_channels'] = []
+        c['fsub'] = "OFF ❌"
+        await event.answer("All channels removed.", alert=True)
+        await cb_handler(event)
 
-    # --- TOGGLE LOGIC (ONE-CLICK) ---
-    elif data == b"toggle_prot":
-        c['protect'] = not c['protect']
-        await event.edit(buttons=settings_btns())
-
-    elif data == b"fsub_menu":
+    elif data == b"toggle_fsub":
+        if not c['fsub_channels']: return await event.answer("❌ Add at least one channel first!", alert=True)
         c['fsub'] = "ON ✅" if "OFF" in c['fsub'] else "OFF ❌"
-        await event.edit(buttons=settings_btns())
-
-    elif data == b"home":
-        user = await event.get_sender()
-        await event.edit(f"**HEY {user.first_name}** 👋", buttons=[[Button.inline("⚙️ SETTINGS", b"settings")]])
+        await cb_handler(event)
 
 # --- MESSAGE HANDLER ---
+
 @client.on(events.NewMessage)
-async def handle_messages(event):
+async def manager(event):
     uid = event.chat_id
+    text = event.text
+
     if uid in DB["states"]:
-        if event.text == "/cancel": #
+        if text == "/cancel":
             del DB["states"][uid]
-            await event.respond("**PROCESS CANCELLED**", buttons=[[Button.inline("⬅️ BACK", b"settings")]])
-            return
-        
-        # Logic for Shortener URL
-        if DB["states"][uid] == "waiting_url":
-            DB["config"]["short_url"] = event.text
+            return await event.respond("**PROCESS CANCELLED**", buttons=[[Button.inline("⬅️ BACK", b"settings")]])
+
+        if DB["states"][uid] == "waiting_fsub":
+            DB["config"]["fsub_channels"].append(text)
             del DB["states"][uid]
-            await event.respond(f"✅ URL SET: `{event.text}`", buttons=[[Button.inline("⬅️ BACK", b"short_menu")]])
-        
-        # Logic for Custom Caption
-        elif DB["states"][uid] == "waiting_caption":
-            DB["config"]["caption"] = event.text
-            del DB["states"][uid]
-            await event.respond("✅ CAPTION UPDATED", buttons=[[Button.inline("⬅️ BACK", b"settings")]])
+            await event.respond(f"✅ **Channel added!** Total: {len(DB['config']['fsub_channels'])}", buttons=[[Button.inline("⬅️ BACK", b"fsub_config")]])
         return
 
-    # Start command logic
-    if event.text.startswith('/start'):
-        await event.respond("**WELCOME TO VJ FILE STORE**", buttons=[[Button.inline("⚙️ SETTINGS", b"settings")]])
+    if text.startswith('/start'):
+        args = text.split()
+        if len(args) > 1:
+            # CHECK MULTIPLE CHANNELS
+            unsubscribed = await get_unsubscribed_channels(uid)
+            if unsubscribed:
+                # Create buttons for each channel they haven't joined
+                btns = []
+                for i, ch_id in enumerate(unsubscribed, 1):
+                    # Note: Using a raw link logic; you might need to adjust link format
+                    btns.append([Button.url(f"📢 JOIN CHANNEL {i}", f"https://t.me/c/{str(ch_id)[4:]}")])
+                btns.append([Button.url("🔄 TRY AGAIN", f"https://t.me/bot?start={args[1]}")])
+                
+                return await event.respond("❌ **YOU MUST JOIN ALL CHANNELS BELOW:**", buttons=btns)
+            
+            fid = args[1]
+            if fid in DB["files"]:
+                file = DB["files"][fid]
+                await client.send_file(uid, file['media'], noscript=DB["config"]["protect"])
+            return
+        await event.respond("**I AM LIVE!**", buttons=settings_btns() if uid == ADMIN_ID else None)
 
-    # Admin storing file
+    # Admin Link Generation
     if uid == ADMIN_ID and event.file:
         fid = str(uuid.uuid4())[:8]
         DB["files"][fid] = {"media": event.media}
-        bot = await client.get_me()
-        await event.reply(f"**FILE STORED!**\n\n`t.me/{bot.username}?start={fid}`")
+        me = await client.get_me()
+        await event.reply(f"**✅ LINK:** `t.me/{me.username}?start={fid}`")
 
 client.run_until_disconnected()
