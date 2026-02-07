@@ -2,10 +2,10 @@ import os, asyncio, uuid
 from telethon import TelegramClient, events, Button, functions, errors
 
 # --- [ 1. CONFIGURATION ] ---
-API_ID = 1234567  
-API_HASH = "your_api_hash"
-BOT_TOKEN = "your_bot_token"
-ADMIN_ID = 12345678 
+API_ID = 24222039  
+API_HASH = "6dd2dc70434b2f577f76a2e993135662"
+BOT_TOKEN = "8430798122:AAHOcHZn2-w7Wq2OU0pUVRAiN47Y4e7vnLE"
+ADMIN_ID = 6046055058 
 
 client = TelegramClient('VJ_FileStore', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
 
