@@ -1,3 +1,2 @@
 telethon
-fastapi
-uvicorn
+python-dotenv
