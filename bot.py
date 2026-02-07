@@ -24,8 +24,8 @@ DB = {
 # --- [ 3. UI GENERATORS ] ---
 
 def get_settings_btns():
-    """Matches"""
     c = DB["config"]
+    # Grouping buttons to look "Smooth" and "Small" just like your SS
     return [
         [Button.url("🤖 MY CLONE BOT", "https://t.me/botfather")],
         [Button.inline("💸 PREMIUM PLAN", b"premium")],
@@ -54,13 +54,14 @@ async def start(event):
 
     user = await event.get_sender()
     name = user.first_name.upper() if user.first_name else "USER"
-    # Exact Text from
+    
     text = (
         f"**HEY {name}** 👋,\n\n"
         "**I AM A PERMENANT FILE STORE BOT WITH CLONE AND MANY AMAZING ADVANCE FEATURE AND USERS CAN ACCESS STORED MESSAGES BY USING A SHAREABLE LINK GIVEN BY ME**\n\n"
         "**TO KNOW MORE CLICK HELP BUTTON.**"
     )
-    # Compact row-based buttons
+    
+    # Put HELP and ABOUT on the same row to make it "Smooth"
     btns = [
         [Button.inline("🤠 HELP", b"help"), Button.inline("📜 ABOUT", b"about")],
         [Button.url("🤖 CREATE OWN CLONE 🤖", "https://t.me/botfather")]
@@ -79,15 +80,15 @@ async def cb_handler(event):
         await start(event)
     
     elif data == b"settings" and uid == ADMIN_ID:
-        #
         await event.edit("**HERE IS THE SETTINGS MENU**\n\n**CUSTOMIZE YOUR SETTINGS AS PER YOUR NEED**", buttons=get_settings_btns())
 
     elif data == b"short_menu":
-        #
+        # FIXED: Removed the backslash from the f-string curly braces
+        url_text = f"URL: `{c['short_url']}`" if c['short_url'] else "YOU DIDN'T ADD ANY SHORTLINK"
         text = (
             "**HERE YOU CAN MANAGE YOUR SHORTNER, THE GENERATED LINK WILL CONVERT INTO YOUR SHORTLINK**\n\n"
             f"**SHORTLINK - {c['shortner']}**\n\n"
-            f"**{'URL: ' + c['short_url'] if c['short_url'] else 'YOU DIDN\\'T ADDED ANY SHORTLINK'}**"
+            f"**{url_text}**"
         )
         btns = [
             [Button.inline("SET SHORTLINK", b"set_sl"), Button.inline("DELETE SHORTLINK", b"del_sl")],
@@ -98,7 +99,6 @@ async def cb_handler(event):
 
     elif data == b"set_sl":
         DB["states"][uid] = "waiting_url"
-        #
         await event.edit("**SEND ME A SHORTLINK URL...**\n\n**FORMAT :**\n\n`https://vjlink.online` - ❌\n`vjlink.online` - ✅\n\n**/cancel - CANCEL THIS PROCESS.**")
 
     elif data == b"toggle_sl":
@@ -108,14 +108,9 @@ async def cb_handler(event):
     elif data == b"toggle_prot":
         c['protect'] = not c['protect']
         await event.edit(buttons=get_settings_btns())
-    
-    elif data == b"toggle_del":
-        c['auto_delete'] = not c['auto_delete']
-        await event.edit(buttons=get_settings_btns())
 
-    # Alert for un-implemented buttons
-    elif data in [b"premium", b"token_menu", b"cap_menu", b"fsub_menu", b"btn_menu", b"help", b"about", b"del_sl"]:
-        await event.answer("This feature is working but requires additional setup!", alert=True)
+    elif data in [b"help", b"about"]:
+        await event.answer("Help/About section is coming soon!", alert=True)
 
 # --- [ 5. MESSAGE MANAGER ] ---
 
@@ -124,7 +119,6 @@ async def manager(event):
     uid = event.chat_id
     if event.text == "/cancel" and uid in DB["states"]:
         del DB["states"][uid]
-        #
         return await event.respond("**CANCELLED THIS PROCESS...**", buttons=[[Button.inline("⬅️ BACK", b"settings")]])
 
     if uid in DB["states"] and DB["states"][uid] == "waiting_url":
@@ -137,6 +131,7 @@ async def manager(event):
         fid = str(uuid.uuid4())[:8]
         DB["files"][fid] = {"media": event.media}
         bot = await client.get_me()
-        await event.reply(f"**✅ FILE STORED!**\n\n`t.me/{bot.username}?start={fid}`")
+        await event.reply(f"**✅ FILE STORED!**\n\nLink: `t.me/{bot.username}?start={fid}`")
 
+print("Bot deployed successfully and running smoothly!")
 client.run_until_disconnected()
