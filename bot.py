@@ -1,120 +1,334 @@
-import os, asyncio, uuid
-from telethon import TelegramClient, events, Button, functions, errors
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+from telethon.errors import ChatWriteForbiddenError, FloodWaitError
+from telethon.tl import types as tltypes
+from telethon.tl.types import (
+    MessageEntityUrl, MessageEntityTextUrl, MessageEntityMention,
+    UserStatusOnline, UserStatusOffline
+)
 
-# --- [ 1. CONFIGURATION ] ---
-API_ID = 24222039  
-API_HASH = "6dd2dc70434b2f577f76a2e993135662"
-BOT_TOKEN = "8430798122:AAHOcHZn2-w7Wq2OU0pUVRAiN47Y4e7vnLE"
-ADMIN_ID = 6046055058 
+import os, asyncio, json, threading, time, random, sys
+from fastapi import FastAPI
+import uvicorn
+import logging
+from datetime import datetime, timedelta, timezone
 
-client = TelegramClient('VJ_FileStore', API_ID, API_HASH).start(bot_token=BOT_TOKEN)
+# =========================
+# Logging
+# =========================
+logging.basicConfig(
+    level=logging.INFO,
+    filename="error.log",
+    filemode="a",
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+log = logging.getLogger("bot")
 
-# --- [ 2. DATABASE ] ---
-DB = {
-    "config": {
-        "protect": "OFF ❌", "auto_delete": "OFF ❌", 
-        "shortner": "OFF ❌", "short_url": None,
-        "fsub": "OFF ❌", "channels": [], 
-        "token_verify": "OFF ❌", "caption": "✨ **{filename}**"
-    },
-    "files": {}, "states": {} 
-}
+# =========================
+# Keep-alive API (Koyeb)
+# =========================
+app = FastAPI()
 
-# --- [ 3. UI GENERATOR ] ---
+@app.get("/")
+async def root():
+    return {"status": "Bot is alive!"}
 
-def get_settings_btns():
-    """Groups buttons side-by-side for the 'Small/Medium' look"""
-    c = DB["config"]
-    return [
-        [Button.url("🤖 MY CLONE BOT", "https://t.me/botfather")],
-        # Grouped side-by-side to stay small
-        [Button.inline("💸 PREMIUM PLAN", b"premium"), Button.inline("🔗 LINK SHORTNER", b"short_menu")],
-        [Button.inline(f"⏰ TOKEN VERIFICATION [{c['token_verify']}]", b"toggle_token")],
-        [Button.inline("🍿 CUSTOM CAPTION", b"cap_menu"), Button.inline("📢 FSUB", b"fsub_menu")],
-        [Button.inline("🔘 CUSTOM BUTTON", b"btn_menu")],
-        # Grouped side-by-side
-        [Button.inline(f"♻️ DEL [{c['auto_delete']}]", b"toggle_del"), Button.inline(f"🔒 PROT [{c['protect']}]", b"toggle_prot")],
-        [Button.inline("⬅️ BACK", b"home")]
-    ]
+threading.Thread(
+    target=lambda: uvicorn.run(app, host="0.0.0.0", port=8080),
+    daemon=True
+).start()
 
-# --- [ 4. HANDLERS ] ---
+# =========================
+# Credentials
+# =========================
+API_ID = 123456
+API_HASH = "YOUR_API_HASH"
+SESSION = "YOUR_STRING_SESSION"
+PRIMARY_ADMIN = 123456789
+SECONDARY_ADMIN = 123456789
 
-@client.on(events.NewMessage(pattern='/start'))
-async def start(event):
-    uid = event.sender_id
-    user = await event.get_sender()
-    name = user.first_name.upper() if user.first_name else "USER"
-    
-    # Matching screenshot text
-    text = f"**HEY {name}** 👋,\n\n**I AM A PERMENANT FILE STORE BOT...**"
-    
-    # SMALL side-by-side buttons
-    btns = [
-        [Button.inline("🤠 HELP", b"help"), Button.inline("📜 ABOUT", b"about")],
-        [Button.url("🤖 CREATE OWN CLONE 🤖", "https://t.me/botfather")]
-    ]
-    if uid == ADMIN_ID:
-        btns.insert(0, [Button.inline("⚙️ SETTINGS", b"settings")])
-    await event.respond(text, buttons=btns)
+# =========================
+# Files
+# =========================
+GROUPS_FILE = "groups.json"
+SETTINGS_FILE = "settings.json"
 
-@client.on(events.CallbackQuery)
-async def cb_handler(event):
-    data = event.data
-    uid = event.sender_id
-    c = DB["config"]
+# =========================
+# Load Data
+# =========================
+def load_data():
+    try:
+        groups = set(json.load(open(GROUPS_FILE)))
+    except:
+        groups = set()
 
-    # --- REAL CALLBACK FUNCTIONS ---
-    if data == b"settings":
-        await event.edit("**HERE IS THE SETTINGS MENU**", buttons=get_settings_btns())
+    try:
+        d = json.load(open(SETTINGS_FILE))
+    except:
+        d = {}
 
-    elif data == b"toggle_token":
-        c['token_verify'] = "ON ✅" if "OFF" in c['token_verify'] else "OFF ❌"
-        await event.edit(buttons=get_settings_btns())
+    return (
+        groups,
+        d.get("reply_msg", "🤖 Bot is active!"),
+        d.get("delete_delay", 15),
+        d.get("reply_gap", 30),
+        d.get("pm_msg", None),
+        d.get("pm_enabled", True),
+        d.get("pm_delete", 15),
+        d.get("pm_once", False),
+        d.get("admin_autodel", 20)
+    )
 
-    elif data == b"toggle_del":
-        c['auto_delete'] = "ON ✅" if "OFF" in c['auto_delete'] else "OFF ❌"
-        await event.edit(buttons=get_settings_btns())
+def save_data():
+    json.dump(list(groups), open(GROUPS_FILE, "w"))
+    json.dump({
+        "reply_msg": msg,
+        "delete_delay": delay,
+        "reply_gap": gap,
+        "pm_msg": pm_msg,
+        "pm_enabled": pm_enabled,
+        "pm_delete": pm_delete,
+        "pm_once": pm_once,
+        "admin_autodel": admin_autodel
+    }, open(SETTINGS_FILE, "w"))
 
-    elif data == b"toggle_prot":
-        c['protect'] = "ON ✅" if "OFF" in c['protect'] else "OFF ❌"
-        await event.edit(buttons=get_settings_btns())
+groups, msg, delay, gap, pm_msg, pm_enabled, pm_delete, pm_once, admin_autodel = load_data()
 
-    elif data == b"home":
-        await start(event)
+# =========================
+# State
+# =========================
+client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
+last_reply = {}
+last_sent_messages = {}
+pm_replied_users = set()
+bot_active = True
+emergency_stop = False
+flood_pause_until = 0
 
-    # State triggers for inputs
-    elif data == b"cap_menu":
-        DB["states"][uid] = "waiting_cap"
-        await event.edit("**SEND YOUR NEW CUSTOM CAPTION...**")
+# =========================
+# Helpers
+# =========================
+async def safe_delete(message, after):
+    await asyncio.sleep(after)
+    try:
+        await message.delete()
+    except:
+        pass
 
-    # Alert for unfinished features
-    elif data in [b"premium", b"short_menu", b"fsub_menu", b"btn_menu", b"help", b"about"]:
-        await event.answer("Feature is being optimized!", alert=True)
+async def notify_admin(text):
+    try:
+        m = await client.send_message(PRIMARY_ADMIN, text)
+        await asyncio.sleep(admin_autodel)
+        await m.delete()
+    except:
+        pass
 
-# --- [ 5. FILE STORAGE & STATES ] ---
+# =========================
+# HELP TEXT
+# =========================
+HELP_TEXT = """
+🤖 ADVANCED BOT COMMANDS
 
-@client.on(events.NewMessage)
-async def manager(event):
-    uid = event.sender_id
-    
-    # Cancel Process
-    if event.text == "/cancel":
-        DB["states"].pop(uid, None)
-        return await event.respond("**CANCELLED.**", buttons=[[Button.inline("⬅️ BACK", b"settings")]])
+⚙ CONTROL
+/status
+/stopbot
+/resumebot
 
-    # Handling Input States
-    if uid in DB["states"]:
-        if DB["states"][uid] == "waiting_cap":
-            DB["config"]["caption"] = event.text
-            DB["states"].pop(uid)
-            return await event.respond("✅ **CAPTION UPDATED!**", buttons=[[Button.inline("⬅️ BACK", b"settings")]])
+👥 GROUP
+/addgroup <id>
+/delgroup <id>
+/listgroups
+/cleargroups
+/setmsg <text>
+/setdel <sec>
+/setgap <sec>
 
-    # ACTUAL FILE STORE FUNCTION
-    if uid == ADMIN_ID and event.file:
-        fid = str(uuid.uuid4())[:8]
-        DB["files"][fid] = {"media": event.media}
-        bot = await client.get_me()
-        await event.reply(f"**✅ FILE STORED!**\n\n`t.me/{bot.username}?start={fid}`")
+💬 PM
+/setpm <text>
+/pmon
+/pmoff
+/setpmdel <sec>
+/pmonce
+/pmrepeat
+"""
 
-client.run_until_disconnected()
-client.run_until_disconnected()
+# =========================
+# Admin Commands
+# =========================
+@client.on(events.NewMessage(outgoing=True))
+async def admin_cmd(e):
+    global msg, delay, gap
+    global pm_msg, pm_enabled, pm_delete, pm_once
+    global bot_active
+
+    if e.sender_id != PRIMARY_ADMIN:
+        return
+
+    text = e.raw_text.strip()
+
+    if text == "/help":
+        await e.reply(HELP_TEXT)
+
+    elif text == "/status":
+        await e.reply(
+            f"Bot: {'Active' if bot_active else 'Stopped'}\n"
+            f"Groups: {len(groups)}\n"
+            f"PM Enabled: {pm_enabled}\n"
+            f"PM Once: {pm_once}\n"
+            f"Emergency: {emergency_stop}"
+        )
+
+    elif text == "/stopbot":
+        bot_active = False
+        await e.reply("⛔ Bot Stopped")
+
+    elif text == "/resumebot":
+        bot_active = True
+        await e.reply("✅ Bot Resumed")
+
+    elif text.startswith("/addgroup"):
+        gid = int(text.split()[1])
+        groups.add(gid)
+        save_data()
+        await e.reply("✅ Group added")
+
+    elif text.startswith("/delgroup"):
+        gid = int(text.split()[1])
+        groups.discard(gid)
+        save_data()
+        await e.reply("✅ Group removed")
+
+    elif text == "/listgroups":
+        await e.reply(str(groups))
+
+    elif text == "/cleargroups":
+        groups.clear()
+        save_data()
+        await e.reply("✅ All groups cleared")
+
+    elif text.startswith("/setmsg"):
+        msg = text.replace("/setmsg", "").strip()
+        save_data()
+        await e.reply("✅ Group reply updated")
+
+    elif text.startswith("/setdel"):
+        delay = int(text.split()[1])
+        save_data()
+        await e.reply("✅ Group delete delay updated")
+
+    elif text.startswith("/setgap"):
+        gap = int(text.split()[1])
+        save_data()
+        await e.reply("✅ Gap updated")
+
+    elif text.startswith("/setpm"):
+        pm_msg = text.replace("/setpm", "").strip()
+        save_data()
+        await e.reply("✅ PM message set")
+
+    elif text == "/pmon":
+        pm_enabled = True
+        save_data()
+        await e.reply("✅ PM Enabled")
+
+    elif text == "/pmoff":
+        pm_enabled = False
+        save_data()
+        await e.reply("⛔ PM Disabled")
+
+    elif text.startswith("/setpmdel"):
+        pm_delete = int(text.split()[1])
+        save_data()
+        await e.reply("✅ PM delete delay updated")
+
+    elif text == "/pmonce":
+        pm_once = True
+        save_data()
+        await e.reply("✅ PM Once Mode Enabled")
+
+    elif text == "/pmrepeat":
+        pm_once = False
+        pm_replied_users.clear()
+        save_data()
+        await e.reply("✅ PM Repeat Mode Enabled")
+
+# =========================
+# Emergency Watch
+# =========================
+@client.on(events.UserUpdate)
+async def watch_admin(event):
+    global emergency_stop
+    if isinstance(event.status, UserStatusOnline):
+        emergency_stop = True
+    elif isinstance(event.status, UserStatusOffline):
+        emergency_stop = False
+
+# =========================
+# Main Handler
+# =========================
+@client.on(events.NewMessage(incoming=True))
+async def handler(event):
+    global last_reply
+
+    if not bot_active or emergency_stop:
+        return
+
+    try:
+        # ===== PM =====
+        if event.is_private:
+            if not pm_enabled or not pm_msg:
+                return
+
+            if pm_once and event.sender_id in pm_replied_users:
+                return
+
+            reply = await event.reply(pm_msg)
+
+            if pm_delete > 0:
+                asyncio.create_task(safe_delete(reply, pm_delete))
+
+            pm_replied_users.add(event.sender_id)
+            return
+
+        # ===== GROUP =====
+        if event.chat_id not in groups:
+            return
+
+        if event.sender and getattr(event.sender, "bot", False):
+            return
+
+        if event.message.entities:
+            for ent in event.message.entities:
+                if isinstance(ent, (MessageEntityUrl, MessageEntityTextUrl, MessageEntityMention)):
+                    return
+
+        now = time.time()
+        if now - last_reply.get(event.chat_id, 0) < gap:
+            return
+
+        last_reply[event.chat_id] = now
+
+        reply = await event.reply(msg)
+
+        if delay > 0:
+            asyncio.create_task(safe_delete(reply, delay))
+
+    except FloodWaitError as f:
+        flood_pause_until = time.time() + f.seconds
+        await asyncio.sleep(f.seconds)
+
+    except ChatWriteForbiddenError:
+        await notify_admin("❌ Bot cannot write in a group.")
+
+    except Exception as e:
+        log.error(str(e))
+
+# =========================
+# Start
+# =========================
+async def main():
+    await client.start()
+    print("✅ FULL ADVANCED BOT RUNNING...")
+    await client.run_until_disconnected()
+
+asyncio.run(main())
