@@ -110,7 +110,7 @@ flood_pause_until = 0
 # =========================
 # 👑 ADMIN COMMANDS
 # =========================
-@client.on(events.NewMessage(incoming=True))
+@client.on(events.NewMessage(outgoing=True))
 async def admin_cmd(e):
     global msg, delay, gap
     global pm_msg, pm_enabled, pm_delete, pm_once
