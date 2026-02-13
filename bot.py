@@ -255,6 +255,22 @@ async def handler(event):
     group_queues[event.chat_id].append(event)
     asyncio.create_task(process_queue(event.chat_id))
 
+# ================= FASTAPI KEEP ALIVE =================
+from fastapi import FastAPI
+import uvicorn
+import threading
+
+app = FastAPI()
+
+@app.get("/")
+async def root():
+    return {"status": "Bot is running"}
+
+def run_web():
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+
+threading.Thread(target=run_web).start()
+
 # ================= START =================
 async def main():
     await client.start()
