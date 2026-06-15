@@ -46,10 +46,10 @@ if os.path.exists("bot_transfer.json"):
     SESSION = data.get("SESSION")
     PRIMARY_ADMIN = data.get("PRIMARY_ADMIN")
 else:
-    API_ID = 34830839
-    API_HASH = "073a844de711855725c5a703aaccce87"
-    SESSION = "1BVtsOMYBu1L4N4GbgVShKssKgAZNIreNdpmeuKMzfVJPiXFdt7B-G0WpVcTxOQxBdFKZmirD5wl3PycIRvmQR7tnW1rKJEVuEFYf5PPd12xLBzKjuq7cvHoiyc9Mcfo22WHs294rUQPvjCBUD3aTy606uiSuzUPgkFPnFkwyVTiynKjSyd-ie_ZCckPzptiHo0sa_tvXgWjpIxgLhEyygeeGEuYK5457jYrSbh3Re8FPmYAfvIirqoIWv7dnjVFOHN5A25LN6SSMEG3Az97Gz4Yjzu0o-TZVvve73XjWFRBik7Ji-VKt1LCk3hmvFkRQbqjBStFSKBhPkmgtMUeIsoXhHKtxQtc="
-    PRIMARY_ADMIN = 7716976150
+    API_ID = 20871501
+    API_HASH = "253d556503b0e6e4395d72446d6dedd9"
+    SESSION = "1AZWarzQBu5_s4pzgMjm25ZOLjHWwzxSvi7GleRTc1lSBDH5vjuhPFxXEdBt2Snoqw26ptrzv-DXq2IFctgoCmlxTY5aIW8fROpPQklkHRFa9qo-FNWlYBHYi5OM4c-jeuOdLfY7te-MDRvsm10_rRnL_2SvPmwuKRghKMAhs4x63tj_ThRd5vWBhlVUI9ItF4j2V646YkzdWqSuob95P5tnkbcV-P7yvGuyPnM90387o3fM_o04jZ1A6u0pv1xla8oib8Jn-mRX4d5ahykav-z7Z4g00y-zdfrnquTaHAwhCDZ5gampDnqsugtacS5Cok6js6i_GAwPUCDesuvfSKxYWbFz_3Bc="
+    PRIMARY_ADMIN = 8949066591
 SECONDARY_ADMIN = 6046055058  # real secondary admin ID
 
 # =========================
