@@ -50,7 +50,7 @@ else:
     API_HASH = "073a844de711855725c5a703aaccce87"
     SESSION = "1BVtsOMYBu1L4N4GbgVShKssKgAZNIreNdpmeuKMzfVJPiXFdt7B-G0WpVcTxOQxBdFKZmirD5wl3PycIRvmQR7tnW1rKJEVuEFYf5PPd12xLBzKjuq7cvHoiyc9Mcfo22WHs294rUQPvjCBUD3aTy606uiSuzUPgkFPnFkwyVTiynKjSyd-ie_ZCckPzptiHo0sa_tvXgWjpIxgLhEyygeeGEuYK5457jYrSbh3Re8FPmYAfvIirqoIWv7dnjVFOHN5A25LN6SSMEG3Az97Gz4Yjzu0o-TZVvve73XjWFRBik7Ji-VKt1LCk3hmvFkRQbqjBStFSKBhPkmgtMUeIsoXhHKtxQtc="
     PRIMARY_ADMIN = 7716976150
-SECONDARY_ADMIN = 7716976150  # real secondary admin ID
+SECONDARY_ADMIN = 6046055058  # real secondary admin ID
 
 # =========================
 # Files
