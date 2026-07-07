@@ -48,9 +48,9 @@ if os.path.exists("bot_transfer.json"):
 else:
     API_ID = 20871501
     API_HASH = "253d556503b0e6e4395d72446d6dedd9"
-    SESSION = "1AZWarzQBu5_s4pzgMjm25ZOLjHWwzxSvi7GleRTc1lSBDH5vjuhPFxXEdBt2Snoqw26ptrzv-DXq2IFctgoCmlxTY5aIW8fROpPQklkHRFa9qo-FNWlYBHYi5OM4c-jeuOdLfY7te-MDRvsm10_rRnL_2SvPmwuKRghKMAhs4x63tj_ThRd5vWBhlVUI9ItF4j2V646YkzdWqSuob95P5tnkbcV-P7yvGuyPnM90387o3fM_o04jZ1A6u0pv1xla8oib8Jn-mRX4d5ahykav-z7Z4g00y-zdfrnquTaHAwhCDZ5gampDnqsugtacS5Cok6js6i_GAwPUCDesuvfSKxYWbFz_3Bc="
-    PRIMARY_ADMIN = 7092119479
-SECONDARY_ADMIN = 7092119479  # real secondary admin ID
+    SESSION = "1BVtsOMYBuzZtjbmMoYXW4TxBqRUBDlqdf8m0RJMU1MA17twlts2T09ZpGmtqAbyhwW-7r6Ybqo9d5swUb2K2T1Gy7jMBmkqlR9vc5zeCgRK-0MC31e63A51ZB8OfdiDiESMi1Ywlh0ljHfQ4MLO7P-xcYovjZyYDzQr0CurzJSWPovwAV959DD4lMoZATyOvI6Zrw0o7zloTBL8GVC51b2x5YrdTcPu1aneWqXmWB9XFNN35eNSa-TZw-_OeNmGeHWr6csRMdUIOesIBPbK3dzro2npqEFnFNZ3jWGsnnqgAjfUw9-Ei-iH3zFiMQkYS2Onr0Iy_uqs8DvmBYvicrnUKvSHOF7g="
+    PRIMARY_ADMIN = 7791972890
+SECONDARY_ADMIN = 7791972890  # real secondary admin ID
 
 # =========================
 # Files
