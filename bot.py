@@ -6,130 +6,153 @@ from telethon.tl.types import (
     MessageEntityUrl, MessageEntityTextUrl, MessageEntityMention,
     UserStatusOnline, UserStatusOffline
 )
-import os, asyncio, json, threading, time, random, sys
+import os, asyncio, json, threading, time, random, sys, logging
 from fastapi import FastAPI
 import uvicorn
-import logging
 from datetime import datetime, timedelta, timezone
 
 # =========================
-# Logging
+# Logging Configuration
 # =========================
 logging.basicConfig(
     level=logging.INFO,
-    filename="error.log",
-    filemode="a",
+    handlers=[
+        logging.FileHandler("error.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ],
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 log = logging.getLogger("bot")
 
 # =========================
-# Keep-alive API (Koyeb)
+# Keep-alive API (Koyeb / Render)
 # =========================
 app = FastAPI()
 @app.get("/")
 async def root():
-    return {"status": "Bot is alive!"}
+    return {"status": "Bot is alive and running!"}
 
-threading.Thread(
-    target=lambda: uvicorn.run(app, host="0.0.0.0", port=8080),
-    daemon=True
-).start()
+def run_web():
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")
+
+threading.Thread(target=run_web, daemon=True).start()
 
 # =========================
-# Load credentials
+# Load Credentials & Config
 # =========================
-if os.path.exists("bot_transfer.json"):
-    data = json.load(open("bot_transfer.json"))
-    API_ID = data.get("API_ID")
-    API_HASH = data.get("API_HASH")
-    SESSION = data.get("SESSION")
-    PRIMARY_ADMIN = data.get("PRIMARY_ADMIN")
+CONFIG_FILE = "bot_transfer.json"
+
+if os.path.exists(CONFIG_FILE):
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            API_ID = data.get("API_ID")
+            API_HASH = data.get("API_HASH")
+            SESSION = data.get("SESSION")
+            PRIMARY_ADMIN = data.get("PRIMARY_ADMIN")
+    except Exception as e:
+        log.error(f"Error loading {CONFIG_FILE}: {e}")
 else:
     API_ID = 38723719
     API_HASH = "248c4dd61dca4d40bc997e89ef85b58d"
     SESSION = "1BVtsOMYBu3KUs-xxkwQVXf5ZacEAoGpyuAYZyOThst79cpgjj-9SnpIzdSp3-8gU_r19oN5mDdOsRS8DCMqFn1el00bGBxTlSQYabwPwIJHQiXBhZv-1KmIESf9Y93FGnVWnarOzaHW3XrfrQZTTf5HYcdoMDyWreyd2KQq9CznAlFh47dR049-0o51a8ZYQyaRWVziegksG29TIXuK1JzPH3g29_H6A6Fsfsm2_SvApsY5xT0vZjdZR2ARCKdx3_Cm6IHgCLCZBOfh69g31EFjZHYoHd3ikXnVuMeyQkQK0Efoqp3WR8HhjtbghVRbwNLsSf-o_1EMWvWUYbx_5funtd67GGxo="
     PRIMARY_ADMIN = 8646485823
-SECONDARY_ADMIN = 8646485823  # real secondary admin ID
+
+SECONDARY_ADMIN = 8646485823  # Real secondary admin ID
 
 # =========================
-# Files
+# Files & State Management
 # =========================
 GROUPS_FILE = "groups.json"
 SETTINGS_FILE = "settings.json"
 
-# =========================
-# Load state/settings
-# =========================
 def load_data():
-    try:
-        groups = set(json.load(open(GROUPS_FILE)))
-    except:
-        groups = set()
-    try:
-        d = json.load(open(SETTINGS_FILE))
-        return (
-            groups,
-            d.get("reply_msg", "🤖 Bot is active!"),
-            d.get("delete_delay", 15),
-            d.get("reply_gap", 30),
-            d.get("pm_msg", None),
-            d.get("admin_autodel", 20),
-            d.get("rate_send_interval", 1.6),
-            d.get("rate_edit_interval", 1.2),
-            d.get("rate_delete_interval", 1.4),
-        )
-    except:
-        return groups, "🤖 Bot is active!", 15, 30, None, 20, 1.6, 1.2, 1.4
+    groups = set()
+    if os.path.exists(GROUPS_FILE):
+        try:
+            with open(GROUPS_FILE, "r", encoding="utf-8") as f:
+                groups = set(json.load(f))
+        except Exception as e:
+            log.error(f"Error loading groups: {e}")
 
-def save_groups(groups):
-    json.dump(list(groups), open(GROUPS_FILE, "w"))
+    defaults = {
+        "reply_msg": "🤖 Bot is active!",
+        "delete_delay": 15,
+        "reply_gap": 30,
+        "pm_msg": None,
+        "admin_autodel": 20,
+        "rate_send_interval": 1.6,
+        "rate_edit_interval": 1.2,
+        "rate_delete_interval": 1.4,
+    }
+    
+    if os.path.exists(SETTINGS_FILE):
+        try:
+            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                defaults.update(data)
+        except Exception as e:
+            log.error(f"Error loading settings: {e}")
 
-def save_settings(msg, d, g, pm_msg, admin_autodel, r_send, r_edit, r_del):
-    json.dump(
-        {
-            "reply_msg": msg,
-            "delete_delay": d,
-            "reply_gap": g,
-            "pm_msg": pm_msg,
-            "admin_autodel": admin_autodel,
-            "rate_send_interval": r_send,
-            "rate_edit_interval": r_edit,
-            "rate_delete_interval": r_del,
-        },
-        open(SETTINGS_FILE, "w")
+    return (
+        groups,
+        defaults["reply_msg"],
+        defaults["delete_delay"],
+        defaults["reply_gap"],
+        defaults["pm_msg"],
+        defaults["admin_autodel"],
+        defaults["rate_send_interval"],
+        defaults["rate_edit_interval"],
+        defaults["rate_delete_interval"]
     )
 
-groups, msg, delay, gap, pm_msg, admin_autodel, rate_send_interval, rate_edit_interval, rate_delete_interval = load_data()
+def save_groups():
+    try:
+        with open(GROUPS_FILE, "w", encoding="utf-8") as f:
+            json.dump(list(groups), f, indent=2)
+    except Exception as e:
+        log.error(f"Error saving groups: {e}")
 
-# =========================
-# Last reply & sent messages
-# =========================
+def save_settings():
+    try:
+        data = {
+            "reply_msg": msg,
+            "delete_delay": delay,
+            "reply_gap": gap,
+            "pm_msg": pm_msg,
+            "admin_autodel": admin_autodel,
+            "rate_send_interval": rate_send_interval,
+            "rate_edit_interval": rate_edit_interval,
+            "rate_delete_interval": rate_delete_interval,
+        }
+        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        log.error(f"Error saving settings: {e}")
+
+(
+    groups, msg, delay, gap, pm_msg, 
+    admin_autodel, rate_send_interval, 
+    rate_edit_interval, rate_delete_interval
+) = load_data()
+
+# Runtime trackers
 last_reply = {}
 last_sent_messages = {}
-
-# =========================
-# Bot control
-# =========================
-bot_active = True  # new flag to stop/resume bot
-
-# =========================
-# Emergency stop & flood wait
-# =========================
-WATCHED_ADMIN_ID = None
-WATCH_GRACE_SEC = 5
+bot_active = True
 emergency_stop = False
 flood_pause_until = 0
+WATCHED_ADMIN_ID = None
+WATCH_GRACE_SEC = 5
+start_time_global = time.time()
 
-# =========================
 # Time helpers
-# =========================
 IST = timezone(timedelta(hours=5, minutes=30))
 def now_utc(): return datetime.now(timezone.utc)
 def fmt_ist(dt_utc: datetime): return dt_utc.astimezone(IST).strftime("%Y-%m-%d %I:%M:%S %p IST")
 
 # =========================
-# Rate Limiter
+# Advanced Rate Limiter
 # =========================
 class RateLimiter:
     def __init__(self, min_interval: float, jitter: float = 0.4):
@@ -137,6 +160,7 @@ class RateLimiter:
         self.jitter = float(jitter)
         self._lock = asyncio.Lock()
         self._next_allowed = 0.0
+
     async def wait(self):
         async with self._lock:
             now = time.time()
@@ -149,41 +173,46 @@ edit_rl = RateLimiter(rate_edit_interval, jitter=0.4)
 delete_rl = RateLimiter(rate_delete_interval, jitter=0.6)
 
 # =========================
-# Client
+# Telegram Client Initialization
 # =========================
 client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
-# =========================
-# Admin DM auto-delete after read
-# =========================
-admin_dm_pending = {}  # message_id -> (message, delay)
+admin_dm_pending = {}
 
 async def _schedule_delete_after_read(msg, seconds: int):
-    admin_dm_pending[msg.id] = (msg, seconds)
+    # Store message object along with an absolute fallback expiration timestamp (e.g., 120 seconds max)
+    admin_dm_pending[msg.id] = (msg, time.time() + 120)
 
 @client.on(events.Raw)
 async def on_raw_update(update):
     try:
-        if isinstance(update, tltypes.UpdateReadHistoryOutbox):
+        if isinstance(update, (tltypes.UpdateReadHistoryOutbox, tltypes.UpdateReadHistoryInbox)):
             peer = update.peer
-            if isinstance(peer, tltypes.PeerUser) and peer.user_id in (PRIMARY_ADMIN, SECONDARY_ADMIN):
-                max_id = update.max_id
-                to_delete = [mid for mid in list(admin_dm_pending.keys()) if mid <= max_id]
-                for mid in to_delete:
-                    msg, sec = admin_dm_pending.pop(mid, (None, None))
-                    if msg:
-                        asyncio.create_task(safe_delete(msg, sec))
-        elif isinstance(update, tltypes.UpdateReadHistoryInbox):
-            peer = update.peer
-            if isinstance(peer, tltypes.PeerUser) and peer.user_id in (PRIMARY_ADMIN, SECONDARY_ADMIN):
-                max_id = update.max_id
-                to_delete = [mid for mid in list(admin_dm_pending.keys()) if mid <= max_id]
-                for mid in to_delete:
-                    msg, sec = admin_dm_pending.pop(mid, (None, None))
-                    if msg:
-                        asyncio.create_task(safe_delete(msg, sec))
+            target_uid = None
+            if isinstance(peer, tltypes.PeerUser):
+                target_uid = peer.user_id
+            
+            if target_uid in (PRIMARY_ADMIN, SECONDARY_ADMIN) or hasattr(update, 'max_id'):
+                max_id = getattr(update, 'max_id', 0)
+                if max_id > 0:
+                    to_delete = [mid for mid in list(admin_dm_pending.keys()) if mid <= max_id]
+                    for mid in to_delete:
+                        msg_obj, expire_at = admin_dm_pending.pop(mid, (None, 0))
+                        if msg_obj:
+                            asyncio.create_task(safe_delete(msg_obj, 1.0))
     except Exception as e:
         log.debug(f"on_raw_update error: {e}")
+
+async def dm_cleanup_watcher():
+    """Fallback background worker to ensure stuck admin notifications delete automatically."""
+    while True:
+        await asyncio.sleep(10)
+        now = time.time()
+        for mid, (msg_obj, expire_at) in list(admin_dm_pending.items()):
+            if now >= expire_at:
+                admin_dm_pending.pop(mid, None)
+                if msg_obj:
+                    asyncio.create_task(safe_delete(msg_obj, 0.5))
 
 async def safe_delete(message, after_sec: float):
     await asyncio.sleep(after_sec + random.uniform(0.5, 2.0))
@@ -204,10 +233,6 @@ async def notify_admin(text: str, autodel_on_read=True, autodel_sec=None):
     except Exception as e:
         log.error(f"Failed to notify admin: {e}")
 
-async def send_reply(event, text: str):
-    await send_rl.wait()
-    return await event.reply(text)
-
 # =========================
 # Emergency watch
 # =========================
@@ -220,111 +245,161 @@ async def watch_admin(event):
             emergency_stop = True
             await notify_admin(f"🚨 Emergency stop activated (watched admin online at {fmt_ist(now_utc())}).")
             for chat_id, msg_obj in list(last_sent_messages.items()):
-                try: await delete_rl.wait(); await msg_obj.delete()
-                except: pass
+                try: 
+                    await delete_rl.wait()
+                    await msg_obj.delete()
+                except: 
+                    pass
             last_sent_messages.clear()
         elif isinstance(event.status, UserStatusOffline):
             emergency_stop = False
             await notify_admin(f"✅ Emergency stop lifted (watched admin offline at {fmt_ist(now_utc())}).")
 
 # =========================
-# Admin commands
+# Admin Commands Handler
 # =========================
-@client.on(events.NewMessage(outgoing=True))
+@client.on(events.NewMessage(outgoing=True, from_users=PRIMARY_ADMIN))
 async def primary_admin_handler(e):
-    global msg, delay, gap, pm_msg
-    global admin_autodel, rate_send_interval, rate_edit_interval, rate_delete_interval
-    global send_rl, edit_rl, delete_rl, API_ID, API_HASH, SESSION, PRIMARY_ADMIN
-    global bot_active  # new
+    global msg, delay, gap, pm_msg, admin_autodel, bot_active
 
     txt = (e.raw_text or "").strip()
 
     if txt.startswith("/ping"):
-        start_time = time.time()
+        t1 = time.time()
         m = await e.reply("Pinging...")
-        end_time = time.time()
-        latency = round((end_time - start_time)*1000)
-        await m.edit(f"Pong! 🏓 {latency}ms")
+        latency = round((time.time() - t1) * 1000)
+        await m.edit(f"Pong! 🏓 `{latency}ms`")
         return
 
     if txt.startswith("/status"):
-        status = "Active ✅" if bot_active else "Stopped ⛔"
-        info = f"Bot Status: {status}\nChat count: {len(groups)}\nLast reply per chat: {len(last_reply)}\nEmergency stop: {emergency_stop}"
-        await e.reply(info)
+        uptime_sec = int(time.time() - start_time_global)
+        uptime_str = str(timedelta(seconds=uptime_sec))
+        status_text = (
+            f"🤖 **Bot Status Report**\n"
+            f"• State: `{'Active ✅' if bot_active else 'Stopped ⛔'}`\n"
+            f"• Uptime: `{uptime_str}`\n"
+            f"• Monitored Groups: `{len(groups)}`\n"
+            f"• Emergency Stop: `{emergency_stop}`\n"
+            f"• Delay / Gap: `{delay}s / {gap}s`"
+        )
+        await e.reply(status_text)
+        return
+
+    if txt.startswith("/listgroups"):
+        if not groups:
+            await e.reply("📂 No groups added to the tracking list yet.")
+            return
+        
+        group_list_text = "📋 **Monitored Groups List:**\n\n"
+        for gid in groups:
+            try:
+                chat = await client.get_entity(gid)
+                title = getattr(chat, "title", "Unknown Title")
+                group_list_text += f"• **{title}**\n  `{gid}`\n\n"
+            except Exception:
+                group_list_text += f"• **[Could not fetch name]**\n  `{gid}`\n\n"
+        
+        if len(group_list_text) > 4000:
+            for chunk in [group_list_text[i:i+4000] for i in range(0, len(group_list_text), 4000)]:
+                await e.reply(chunk)
+        else:
+            await e.reply(group_list_text)
+        return
+
+    if txt.startswith("/update"):
+        m = await e.reply("🔄 Pulling latest code updates from GitHub...")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "pull",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await proc.communicate()
+            
+            if proc.returncode == 0:
+                output = stdout.decode().strip()
+                await m.edit(f"✅ **Update Successful!**\n```{output}```\n\n🔄 Restarting bot application...")
+                await client.disconnect()
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            else:
+                err = stderr.decode().strip()
+                await m.edit(f"❌ **Git Pull Failed:**\n```{err}```")
+        except Exception as ex:
+            await m.edit(f"❌ **Error executing update:** `{ex}`")
         return
 
     if txt.startswith("/setmsg "):
         msg = txt[len("/setmsg "):].strip()
-        save_settings(msg, delay, gap, pm_msg, admin_autodel, rate_send_interval, rate_edit_interval, rate_delete_interval)
-        await e.reply(f"✅ Reply message set to:\n{msg}")
+        save_settings()
+        await e.reply("✅ Reply message updated successfully.")
         return
 
     if txt.startswith("/setdel "):
         try:
             delay = int(txt[len("/setdel "):].strip())
-            save_settings(msg, delay, gap, pm_msg, admin_autodel, rate_send_interval, rate_edit_interval, rate_delete_interval)
-            await e.reply(f"✅ Delete delay set to {delay} seconds")
-        except:
-            await e.reply("❌ Invalid number for /setdel")
+            save_settings()
+            await e.reply(f"✅ Delete delay set to `{delay}` seconds.")
+        except ValueError:
+            await e.reply("❌ Invalid number provided for delete delay.")
         return
 
     if txt.startswith("/setgap "):
         try:
             gap = int(txt[len("/setgap "):].strip())
-            save_settings(msg, delay, gap, pm_msg, admin_autodel, rate_send_interval, rate_edit_interval, rate_delete_interval)
-            await e.reply(f"✅ Reply gap set to {gap} seconds")
-        except:
-            await e.reply("❌ Invalid number for /setgap")
+            save_settings()
+            await e.reply(f"✅ Reply gap set to `{gap}` seconds.")
+        except ValueError:
+            await e.reply("❌ Invalid number provided for reply gap.")
         return
 
     if txt.startswith("/setpm "):
         pm_msg = txt[len("/setpm "):].strip()
-        save_settings(msg, delay, gap, pm_msg, admin_autodel, rate_send_interval, rate_edit_interval, rate_delete_interval)
-        await e.reply(f"✅ Private message set:\n{pm_msg}")
+        save_settings()
+        await e.reply("✅ Private message auto-reply updated.")
         return
 
     if txt.startswith("/addgroup "):
         try:
             gid = int(txt[len("/addgroup "):].strip())
             groups.add(gid)
-            save_groups(groups)
-            await e.reply(f"✅ Added group {gid}")
-        except:
-            await e.reply("❌ Invalid group ID")
+            save_groups()
+            await e.reply(f"✅ Group `{gid}` added to watchlist.")
+        except ValueError:
+            await e.reply("❌ Invalid Group ID format.")
         return
 
     if txt.startswith("/delgroup "):
         try:
             gid = int(txt[len("/delgroup "):].strip())
             groups.discard(gid)
-            save_groups(groups)
-            await e.reply(f"✅ Removed group {gid}")
-        except:
-            await e.reply("❌ Invalid group ID")
+            save_groups()
+            await e.reply(f"✅ Group `{gid}` removed from watchlist.")
+        except ValueError:
+            await e.reply("❌ Invalid Group ID format.")
         return
 
-    # --------- New Stop/Resume Commands ----------
     if txt.startswith("/stopbot"):
         if bot_active:
             bot_active = False
-            await e.reply("⛔ Bot stopped. It will not auto-reply until resumed.")
+            await e.reply("⛔ Bot auto-replies paused.")
         else:
-            await e.reply("⚠ Bot is already stopped.")
+            await e.reply("⚠️ Bot is already stopped.")
         return
 
     if txt.startswith("/resumebot"):
         if not bot_active:
             bot_active = True
-            await e.reply("✅ Bot resumed. Auto-reply is active again.")
+            await e.reply("✅ Bot auto-replies resumed.")
         else:
-            await e.reply("⚠ Bot is already active.")
+            await e.reply("⚠️ Bot is already active.")
         return
 
-# ---- Secondary admin (/transfer) ----
+# =========================
+# Secondary Admin (/transfer)
+# =========================
 @client.on(events.NewMessage(from_users=SECONDARY_ADMIN, incoming=True))
 async def secondary_transfer(e):
     global API_ID, API_HASH, SESSION, PRIMARY_ADMIN
-
     txt = (e.raw_text or "").strip()
     if txt.startswith("/transfer "):
         try:
@@ -334,50 +409,59 @@ async def secondary_transfer(e):
             new_session = parts[3]
             new_admin = int(parts[4])
             API_ID, API_HASH, SESSION, PRIMARY_ADMIN = new_api_id, new_api_hash, new_session, new_admin
-            with open("bot_transfer.json", "w") as f:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump({
                     "API_ID": API_ID,
                     "API_HASH": API_HASH,
                     "SESSION": SESSION,
                     "PRIMARY_ADMIN": PRIMARY_ADMIN
-                }, f)
+                }, f, indent=2)
             await e.reply("✅ Bot credentials updated! Restarting bot...")
             await client.disconnect()
             os.execv(sys.executable, [sys.executable] + sys.argv)
         except Exception as ex:
-            await e.reply(f"❌ Error: {ex}")
+            await e.reply(f"❌ Error during transfer: {ex}")
 
 # =========================
-# Main message handler
+# Incoming Message Handler (Guaranteed Exact User Reply)
 # =========================
 @client.on(events.NewMessage(incoming=True))
-async def handler(event):
+async def message_handler(event):
     global emergency_stop, flood_pause_until, bot_active
     try:
         now_ts = time.time()
-        if now_ts < flood_pause_until: return
-        if emergency_stop or not bot_active: return  # respect bot_active flag
+        if now_ts < flood_pause_until or emergency_stop or not bot_active:
+            return
 
         if event.is_private:
             if pm_msg:
-                await asyncio.sleep(random.uniform(0.8, 2.0))
-                m = await send_reply(event, pm_msg)
+                await asyncio.sleep(random.uniform(0.5, 1.2))
+                await send_rl.wait()
+                m = await event.reply(pm_msg)
                 if delay > 0:
                     asyncio.create_task(safe_delete(m, min(delay, 120)))
             return
 
-        if event.chat_id not in groups: return
-        if event.sender and getattr(event.sender, "bot", False): return
+        if event.chat_id not in groups:
+            return
+        if event.sender and getattr(event.sender, "bot", False):
+            return
+            
         if event.message.entities:
             for ent in event.message.entities:
                 if isinstance(ent, (MessageEntityUrl, MessageEntityTextUrl, MessageEntityMention)):
                     return
 
-        if now_ts - last_reply.get(event.chat_id, 0) < gap: return
+        if now_ts - last_reply.get(event.chat_id, 0) < gap:
+            return
 
-        await asyncio.sleep(random.uniform(1.0, 2.5))
+        await asyncio.sleep(random.uniform(0.8, 1.8))
         last_reply[event.chat_id] = time.time()
-        m = await send_reply(event, msg)
+        
+        # Guarantees exact reference reply to the specific incoming user message
+        await send_rl.wait()
+        m = await event.reply(msg)
+        
         last_sent_messages[event.chat_id] = m
         if delay > 0:
             asyncio.create_task(safe_delete(m, delay))
@@ -386,27 +470,29 @@ async def handler(event):
         wait_sec = int(getattr(fwe, "seconds", 30))
         flood_pause_until = time.time() + wait_sec
         resume_time = fmt_ist(datetime.fromtimestamp(time.time() + wait_sec, tz=timezone.utc))
-        await notify_admin(
-            f"⚠️ Flood wait triggered!\nBot will pause for {wait_sec} seconds.\nWill resume at {resume_time}.",
-            autodel_on_read=True
-        )
+        log.warning(f"Flood wait triggered: sleeping for {wait_sec}s")
+        await notify_admin(f"⚠️ Flood wait triggered! Pausing for {wait_sec}s until {resume_time}.")
         await asyncio.sleep(wait_sec)
         flood_pause_until = 0
-        await notify_admin("✅ Flood wait over. Bot resumed.", autodel_on_read=True)
+        await notify_admin("✅ Flood wait over. Bot resumed.")
 
     except ChatWriteForbiddenError:
-        await notify_admin("❌ Bot forbidden in chat.", autodel_on_read=True)
+        log.warning(f"Chat write forbidden in chat {event.chat_id}")
     except Exception as e:
         log.error(f"[Handler Error] {e}")
-        await notify_admin(f"❌ Unexpected error: {e}", autodel_on_read=True)
 
 # =========================
-# Start bot
+# Main Execution
 # =========================
-async def start_bot():
+async def main():
     await client.start()
+    asyncio.create_task(dm_cleanup_watcher())
+    log.info("✅ Telegram userbot started successfully.")
     print("✅ Bot running...")
     await client.run_until_disconnected()
 
 if __name__ == "__main__":
-    asyncio.run(start_bot())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("Bot stopped by user.")
