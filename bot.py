@@ -180,7 +180,6 @@ client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 admin_dm_pending = {}
 
 async def _schedule_delete_after_read(msg, seconds: int):
-    # Store message object along with an absolute fallback expiration timestamp (e.g., 120 seconds max)
     admin_dm_pending[msg.id] = (msg, time.time() + 120)
 
 @client.on(events.Raw)
@@ -204,7 +203,6 @@ async def on_raw_update(update):
         log.debug(f"on_raw_update error: {e}")
 
 async def dm_cleanup_watcher():
-    """Fallback background worker to ensure stuck admin notifications delete automatically."""
     while True:
         await asyncio.sleep(10)
         now = time.time()
@@ -444,7 +442,17 @@ async def message_handler(event):
 
         if event.chat_id not in groups:
             return
+
+        # 1. Block messages sent by any admin user ID or your own userbot account
+        if event.sender_id in (PRIMARY_ADMIN, SECONDARY_ADMIN, client.uid):
+            return
+
+        # 2. Block any message explicitly flagged as a bot by Telegram
         if event.sender and getattr(event.sender, "bot", False):
+            return
+
+        # 3. Block anonymous channel admins or service/bot senders
+        if event.is_channel and event.out:
             return
             
         if event.message.entities:
