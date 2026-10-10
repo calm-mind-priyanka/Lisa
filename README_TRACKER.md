@@ -39,3 +39,34 @@ Set these in the service settings (never commit them to source):
 ## Security note
 
 The original archive contained Telegram session/API credentials embedded in `bot.py`. They have been removed from the source and must be supplied as environment variables or a private `bot_transfer.json`. Because the old session string was included in the archive shared here, revoke that Telegram session and generate a fresh session before deploying. Never share or commit session strings.
+
+
+## Join attribution troubleshooting notes
+
+The tracker reads invite-link joins from Telethon's `events.ChatAction` service
+message. For a `MessageActionChatJoinedByLink`, the exported invite is exposed
+as `action.invite_link`; it is not named `action.invite`. The tracker now reads
+the documented field, keeps compatibility fallbacks, normalizes equivalent
+Telegram invite URL host/trailing-slash forms, and matches only within the
+destination chat.
+
+The dashboard's lifetime unique count is based on users recorded in `members`.
+Current members counts only rows currently marked as members. Clicks are never
+counted as joins. Duplicate join updates for a user already marked as a member
+do not create extra join/rejoin events.
+
+Telegram's MTProto API includes `messages.getChatInviteImporters`, which can
+return users who joined using a specific invite link when the logged-in user
+has the required admin access. The tracker does not automatically import
+historical importers: doing so safely requires reconciling historical dates
+and users while not guessing whether each person is still a member. The
+dashboard's existing database cannot reconstruct past leaves/kicks or current
+membership solely from Telegram's aggregate “joined” count. Historical
+reconciliation should only be performed from importer records returned by
+Telegram, never by copying an aggregate count into member rows.
+
+The `requirements.txt` currently leaves Telethon unpinned, so the exact
+Telethon version installed in a deployed Koyeb image cannot be inferred from
+the repository alone. Check the build logs or run `python -c "import telethon;
+print(telethon.__version__)"` in the deployed image when diagnosing version-
+specific behavior.
