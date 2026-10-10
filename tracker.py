@@ -68,6 +68,19 @@ def init_db():
         """)
 
 
+def _public_base_url(request=None):
+    configured = (os.getenv('PUBLIC_BASE_URL', '') or os.getenv('KOYEB_PUBLIC_DOMAIN', '')).strip().rstrip('/')
+    if configured:
+        if not configured.startswith(('http://', 'https://')):
+            configured = 'https://' + configured
+        return configured
+    # Useful for local deployments too. On Koyeb, PUBLIC_BASE_URL is still the
+    # most reliable setting if a reverse proxy does not forward host headers.
+    if request is not None:
+        return str(request.base_url).rstrip('/')
+    return ''
+
+
 def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -95,8 +108,11 @@ def _authed(request):
 
 def _page(title, body):
     return f"""<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>{html.escape(title)}</title><style>
-    :root{{--bg:#0b1020;--panel:#151d32;--line:#283550;--text:#edf2ff;--muted:#a6b3cb;--accent:#6ee7b7;--red:#fda4af;}}
-    *{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--text);font:15px system-ui,-apple-system,Segoe UI,sans-serif}}main{{max-width:1100px;margin:32px auto;padding:0 16px}}h1{{font-size:26px;margin:0 0 8px}}h2{{font-size:18px}}p,.muted{{color:var(--muted)}}.card{{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:18px;margin:16px 0}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}}.stat{{font-size:26px;font-weight:750}}label{{display:block;color:var(--muted);margin:10px 0 5px}}input,button{{font:inherit;border-radius:9px;padding:11px;border:1px solid var(--line)}}input{{width:100%;background:#0c1427;color:var(--text)}}button,.btn{{background:var(--accent);color:#09251b;font-weight:700;border:0;cursor:pointer;text-decoration:none;display:inline-block;padding:10px 14px;border-radius:9px}}.danger{{color:var(--red)}}table{{width:100%;border-collapse:collapse;min-width:720px}}th,td{{text-align:left;padding:10px;border-bottom:1px solid var(--line);font-size:13px;vertical-align:top}}.tablewrap{{overflow:auto}}code{{overflow-wrap:anywhere;color:#b7f7dc}}.pill{{border:1px solid var(--line);border-radius:99px;padding:3px 8px}}.bar{{height:8px;background:#29354d;border-radius:99px;overflow:hidden;margin-top:7px}}.bar span{{display:block;height:100%;background:var(--accent)}}a{{color:#8decc8}}small{{color:var(--muted)}}
+    :root{{color-scheme:dark;--bg:#080d1b;--panel:#111a2e;--panel2:#17233c;--line:#293957;--text:#f2f6ff;--muted:#a7b5cf;--mint:#5eead4;--blue:#60a5fa;--violet:#a78bfa;--pink:#f472b6;--amber:#fbbf24;--red:#fda4af;--shadow:0 18px 50px rgba(0,0,0,.24)}}
+    *{{box-sizing:border-box}}html{{min-height:100%;background:var(--bg)}}body{{margin:0;min-height:100vh;color:var(--text);font:15px/1.55 Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:radial-gradient(ellipse at 10% 0%,rgba(96,165,250,.16),transparent 35%),radial-gradient(ellipse at 92% 8%,rgba(167,139,250,.15),transparent 32%),var(--bg)}}
+    main{{max-width:1180px;margin:0 auto;padding:34px 22px 64px}}header{{display:flex;align-items:center;justify-content:space-between;gap:18px;flex-wrap:wrap;margin:0 0 26px;padding:22px 24px;border:1px solid rgba(148,163,184,.2);border-radius:22px;background:linear-gradient(120deg,rgba(17,26,46,.96),rgba(23,35,60,.88));box-shadow:var(--shadow)}}header h1{{margin:0;font-size:clamp(25px,4vw,34px);line-height:1.15;letter-spacing:-.04em}}h1{{font-size:clamp(24px,4vw,32px);line-height:1.2;letter-spacing:-.035em}}h2{{margin:0 0 6px;font-size:18px;letter-spacing:-.015em}}h3{{font-size:15px;margin:20px 0 8px}}p{{margin:8px 0;color:var(--muted)}}.muted,small{{color:var(--muted)}}.eyebrow{{font-size:11px;font-weight:800;letter-spacing:.16em;text-transform:uppercase;color:var(--mint);margin:0 0 7px}}.brand-mark{{display:inline-grid;place-items:center;width:40px;height:40px;margin-right:12px;border-radius:13px;color:#071526;background:linear-gradient(135deg,var(--mint),var(--blue),var(--violet));font-weight:900;box-shadow:0 8px 25px rgba(96,165,250,.2);vertical-align:middle}}.card{{position:relative;overflow:hidden;background:linear-gradient(145deg,rgba(17,26,46,.96),rgba(14,22,40,.96));border:1px solid rgba(148,163,184,.18);border-radius:20px;padding:23px;margin:18px 0;box-shadow:var(--shadow)}}.card:before{{content:"";position:absolute;left:0;top:0;width:100%;height:2px;background:linear-gradient(90deg,var(--mint),var(--blue),var(--violet),var(--pink));opacity:.9}}.section-intro{{display:flex;justify-content:space-between;align-items:flex-start;gap:14px;flex-wrap:wrap;margin-bottom:15px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:12px;margin:20px 0}}.grid>div{{min-width:0;padding:15px;border:1px solid rgba(148,163,184,.16);border-radius:15px;background:linear-gradient(145deg,rgba(23,35,60,.9),rgba(14,22,40,.8))}}.grid small{{display:block;line-height:1.4;min-height:30px;font-size:11px;letter-spacing:.02em}}.stat{{font-size:clamp(23px,3vw,29px);font-weight:800;letter-spacing:-.04em;margin-top:6px;overflow-wrap:anywhere}}.bar{{height:8px;background:#25324b;border-radius:99px;overflow:hidden;margin-top:11px}}.bar span{{display:block;height:100%;border-radius:99px;background:linear-gradient(90deg,var(--mint),var(--blue),var(--violet));box-shadow:0 0 15px rgba(94,234,212,.2)}}label{{display:block;color:#dbe6fa;font-size:13px;font-weight:650;margin:15px 0 7px}}input,button{{font:inherit;border-radius:11px;padding:12px 14px;border:1px solid var(--line)}}input{{width:100%;color:var(--text);background:#0a1224;outline:none;transition:border-color .2s,box-shadow .2s}}input:focus{{border-color:var(--blue);box-shadow:0 0 0 3px rgba(96,165,250,.15)}}button,.btn{{background:linear-gradient(100deg,var(--mint),#7dd3fc);color:#071827;font-weight:800;border:0;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 17px;border-radius:11px;transition:transform .15s,filter .15s;box-shadow:0 8px 20px rgba(94,234,212,.12)}}button:hover,.btn:hover{{filter:brightness(1.07);transform:translateY(-1px)}}.secondary{{background:#1d2b45;color:#e6efff;border:1px solid #354766;box-shadow:none}}.danger{{color:var(--red)}}.pill{{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(94,234,212,.28);background:rgba(94,234,212,.09);color:#99f6e4;border-radius:99px;padding:4px 10px;font-size:11px;font-weight:800;letter-spacing:.04em}}.pill:before{{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}}.pill.completed{{color:#c4b5fd;background:rgba(167,139,250,.1);border-color:rgba(167,139,250,.28)}}.tablewrap{{overflow:auto;border:1px solid rgba(148,163,184,.15);border-radius:12px}}table{{width:100%;border-collapse:collapse;min-width:560px;background:rgba(8,13,27,.35)}}th,td{{text-align:left;padding:12px 13px;border-bottom:1px solid rgba(148,163,184,.12);font-size:12px;vertical-align:top}}th{{color:#b9c9e4;background:rgba(96,165,250,.07);font-weight:750;white-space:nowrap}}tr:last-child td{{border-bottom:0}}code{{display:inline-block;max-width:100%;overflow-wrap:anywhere;color:#99f6e4;background:rgba(94,234,212,.06);border:1px solid rgba(94,234,212,.12);border-radius:8px;padding:5px 8px;font-size:12px}}.linkbox{{display:flex;align-items:center;gap:10px;flex-wrap:wrap}}.linkbox code{{flex:1;min-width:190px}}.form-grid{{display:grid;grid-template-columns:1fr 1fr;gap:0 16px}}.form-grid .full{{grid-column:1/-1}}.empty-state{{text-align:center;padding:34px 18px;border:1px dashed #34435e;border-radius:14px;background:rgba(96,165,250,.035)}}.empty-icon{{font-size:28px;margin-bottom:6px}}.notice{{border:1px solid rgba(251,191,36,.25);background:rgba(251,191,36,.07);border-radius:12px;padding:12px 14px;font-size:12px}}.login-card{{max-width:460px;margin:10vh auto 0}}.login-card form{{margin-top:20px}}.login-card button{{width:100%;margin-top:10px}}.footer-note{{text-align:center;font-size:11px;color:#72829f;margin-top:24px}}.hero-copy{{max-width:650px}}.campaign-top{{display:flex;justify-content:space-between;gap:18px;flex-wrap:wrap}}.campaign-top>div{{min-width:0}}.target-note{{font-size:12px;color:#9eb0cc}}
+    @media(max-width:640px){{main{{padding:18px 12px 42px}}header{{padding:18px;border-radius:17px}}.card{{padding:17px;border-radius:16px}}.grid{{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}}.grid>div{{padding:12px}}.stat{{font-size:24px}}.form-grid{{grid-template-columns:1fr}}.form-grid .full{{grid-column:auto}}.login-card{{margin-top:7vh}}.linkbox code{{min-width:100%}}}}
+    @media(prefers-reduced-motion:reduce){{*,*:before,*:after{{scroll-behavior:auto!important;transition:none!important}}}}
     </style></head><body><main>{body}</main></body></html>"""
 
 
@@ -107,7 +123,7 @@ def install_tracker(app, client, admin_getter):
     async def tracker_root(request: Request):
         # Admin sees dashboard at the main Koyeb URL after login; everyone else sees blank.
         if _authed(request):
-            return await dashboard_html()
+            return await dashboard_html(request)
         return HTMLResponse("<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'></head><body></body></html>")
 
     @app.get("/login", response_class=HTMLResponse)
@@ -116,7 +132,7 @@ def install_tracker(app, client, admin_getter):
             return RedirectResponse("/", status_code=303)
         if not TRACKER_PASSWORD or not COOKIE_SECRET:
             return HTMLResponse(_page("Tracker setup required", "<section class='card'><h1>Tracker setup required</h1><p>Set TRACKER_ADMIN_PASSWORD and TRACKER_SECRET_KEY in your Koyeb environment variables.</p></section>"), status_code=503)
-        body = "<section class='card' style='max-width:430px;margin:10vh auto'><h1>Admin sign in</h1><p>Private campaign dashboard</p><form method='post' action='/login'><label>Dashboard password</label><input name='password' type='password' required autocomplete='current-password'><p><button type='submit'>Sign in</button></p></form></section>"
+        body = "<section class='card login-card'><p class='eyebrow'>Private workspace</p><h1><span class='brand-mark'>CT</span>Welcome back</h1><p>Sign in to manage your Telegram campaigns, links and verified joins.</p><form method='post' action='/login'><label for='password'>Dashboard password</label><input id='password' name='password' type='password' required autocomplete='current-password' placeholder='Enter your admin password'><button type='submit'>Sign in <span aria-hidden='true'>→</span></button></form><p class='footer-note'>Private admin access · Protected session</p></section>"
         return HTMLResponse(_page("Admin sign in", body))
 
     @app.post("/login")
@@ -140,26 +156,33 @@ def install_tracker(app, client, admin_getter):
     async def dashboard(request: Request):
         if not _authed(request):
             return RedirectResponse("/login", status_code=303)
-        return await dashboard_html()
+        return await dashboard_html(request)
 
-    async def dashboard_html():
+    async def dashboard_html(request):
         with db() as c:
             campaigns = c.execute("SELECT * FROM campaigns ORDER BY id DESC").fetchall()
         cards = []
+        public_base = _public_base_url(request)
         for camp in campaigns:
             with db() as c:
                 unique = c.execute("SELECT COUNT(*) n FROM members WHERE campaign_id=?", (camp['id'],)).fetchone()['n']
                 active = c.execute("SELECT COUNT(*) n FROM members WHERE campaign_id=? AND is_member=1", (camp['id'],)).fetchone()['n']
-                leaves = c.execute("SELECT COUNT(*) n FROM events WHERE campaign_id=? AND event_type='left'", (camp['id'],)).fetchone()['n']
+                leaves = c.execute("SELECT COUNT(*) n FROM events WHERE campaign_id=? AND event_type IN ('left','kicked')", (camp['id'],)).fetchone()['n']
+                rejoins = c.execute("SELECT COUNT(*) n FROM events WHERE campaign_id=? AND event_type='rejoined'", (camp['id'],)).fetchone()['n']
                 evs = c.execute("SELECT * FROM events WHERE campaign_id=? ORDER BY id DESC LIMIT 12", (camp['id'],)).fetchall()
-            pct = min(100, int(unique * 100 / camp['target']))
-            state = "Completed" if camp['status'] == 'completed' else "Active"
+            # The target is the current number of tracked campaign members, not
+            # the lifetime number of different people who ever joined.
+            pct = min(100, int(active * 100 / camp['target']))
+            state = "Closed at target" if camp['status'] == 'completed' else "Active"
+            state_class = 'completed' if camp['status'] == 'completed' else ''
+            target_label = "TARGET MET NOW" if active >= camp['target'] else "TARGET NOT MET"
+            tracking_url = (public_base + '/r/' + str(camp['id'])) if public_base else ('/r/' + str(camp['id']))
             event_rows = "".join(f"<tr><td>{html.escape(e['occurred_at'])}</td><td>{html.escape(e['event_type'])}</td><td>{html.escape(str(e['user_id'] or '—'))}</td><td>{html.escape('@'+e['username'] if e['username'] else '—')}</td></tr>" for e in evs) or "<tr><td colspan='4'>No confirmed member events yet.</td></tr>"
-            cards.append(f"""<section class='card'><div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap'><div><h2>#{camp['id']} — {html.escape(camp['name'])}</h2><p>{html.escape(camp['destination_title'])} · <span class='pill'>{state}</span></p></div><div><small>Campaign link</small><br><code>{html.escape(os.getenv('PUBLIC_BASE_URL','').rstrip('/') + '/r/' + str(camp['id']) if os.getenv('PUBLIC_BASE_URL') else '/r/'+str(camp['id']))}</code></div></div>
-            <div class='grid'><div><small>Unique confirmed joins / target</small><div class='stat'>{unique} / {camp['target']}</div><div class='bar'><span style='width:{pct}%'></span></div></div><div><small>Currently known members</small><div class='stat'>{active}</div></div><div><small>Leaves recorded</small><div class='stat'>{leaves}</div></div><div><small>Link clicks</small><div class='stat'>{camp['clicks']}</div></div><div><small>Target remaining</small><div class='stat'>{max(0,camp['target']-unique)}</div></div></div>
+            cards.append(f"""<section class='card'><div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap'><div><h2>#{camp['id']} — {html.escape(camp['name'])}</h2><p>{html.escape(camp['destination_title'])} · <span class='pill {state_class}'>{state}</span> · <strong>{target_label}</strong></p></div><div><small>Campaign tracking URL</small><br><div class='linkbox'><code>{html.escape(tracking_url)}</code><button type='button' class='secondary' onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent).then(()=>{{this.textContent='Copied!'}})">Copy link</button></div></div></div>
+            <div class='grid'><div><small>Unique attributed users (lifetime)</small><div class='stat'>{unique}</div></div><div><small>Current members / target</small><div class='stat'>{active} / {camp['target']}</div><div class='bar'><span style='width:{pct}%'></span></div></div><div><small>Leaves / kicks recorded</small><div class='stat'>{leaves}</div></div><div><small>Rejoin events</small><div class='stat'>{rejoins}</div></div><div><small>Tracking link hits</small><div class='stat'>{camp['clicks']}</div></div><div><small>Target remaining (current members)</small><div class='stat'>{max(0,camp['target']-active)}</div></div></div>
             <p class='muted'>Created: {html.escape(camp['created_at'])} {(' · Completed: '+html.escape(camp['completed_at'])) if camp['completed_at'] else ''}</p><p><small>Telegram invite:</small> <code>{html.escape(camp['invite_link'])}</code></p><h3>Recent join/leave history</h3><div class='tablewrap'><table><thead><tr><th>Time (UTC)</th><th>Event</th><th>User ID</th><th>Username</th></tr></thead><tbody>{event_rows}</tbody></table></div></section>""")
-        create_form = """<section class='card'><h2>Create campaign</h2><p class='muted'>Use a group/channel where your Telegram account can create invite links (usually administrator permission required).</p><form method='post' action='/campaigns'><label>Campaign name</label><input name='name' required maxlength='100' placeholder='June promotion'><label>Telegram group/channel link or @username</label><input name='destination' required placeholder='https://t.me/yourgroup or @yourgroup'><label>Unique confirmed join target</label><input name='target' type='number' min='1' max='1000000' required value='200'><p><button type='submit'>Create campaign link</button></p></form><small>Clicks are not joins. Only confirmed join events attributed to this campaign's unique invite count toward its target.</small></section>"""
-        body = "<header><h1>Campaign Tracker</h1><p>Private admin dashboard · updates every 10 seconds</p><form method='post' action='/logout'><button type='submit'>Sign out</button></form></header>" + create_form + ("".join(cards) if cards else "<section class='card'>No campaigns yet. Create your first campaign above.</section>")
+        create_form = """<section class='card'><div class='section-intro'><div><p class='eyebrow'>Launch a campaign</p><h2>Create a tracking link</h2><p>Set a destination and target. Your private invite and tracking URL are generated automatically.</p></div><span class='pill'>New campaign</span></div><form method='post' action='/campaigns' class='form-grid'><div><label for='name'>Campaign name</label><input id='name' name='name' required maxlength='100' placeholder='October bio campaign'></div><div><label for='target'>Unique join target</label><input id='target' name='target' type='number' min='1' max='1000000' required value='100'></div><div class='full'><label for='destination'>Telegram group or channel</label><input id='destination' name='destination' required placeholder='@yourgroup or https://t.me/yourgroup'></div><div class='full'><p><button type='submit'>✦ Generate tracking link</button></p><div class='notice'>Important: clicks and existing members are not counted as new joins. Only confirmed join events attributed to this campaign's unique invite count toward membership. Link hits may include automated preview/scanner requests. Your Telegram account needs permission to create invite links.</div></div></form></section>"""
+        body = "<header><div class='hero-copy'><p class='eyebrow'>Telegram growth workspace</p><h1><span class='brand-mark'>CT</span>Campaign Tracker</h1><p>One dashboard for every bio link, verified join and campaign milestone.</p></div><div><form method='post' action='/logout'><button type='submit' class='secondary'>Sign out ↗</button></form><p class='target-note'>● Live dashboard · refreshes every 10 seconds</p></div></header>" + create_form + ("".join(cards) if cards else "<section class='card empty-state'><div class='empty-icon'>✦</div><h2>Your first campaign starts here</h2><p>Create a campaign above to generate a unique tracking link and see verified joins in this dashboard.</p></section>")
         body += "<script>setTimeout(()=>location.reload(),10000)</script>"
         return HTMLResponse(_page("Campaign Tracker", body), headers={"Cache-Control":"no-store"})
 
@@ -226,8 +249,8 @@ def install_tracker(app, client, admin_getter):
             camp = c.execute("SELECT target,status FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
             if not camp or camp['status'] != 'active':
                 return False
-            unique = c.execute("SELECT COUNT(*) n FROM members WHERE campaign_id=?", (campaign_id,)).fetchone()['n']
-            if unique >= camp['target']:
+            active = c.execute("SELECT COUNT(*) n FROM members WHERE campaign_id=? AND is_member=1", (campaign_id,)).fetchone()['n']
+            if active >= camp['target']:
                 c.execute("UPDATE campaigns SET status='completed', completed_at=? WHERE id=?", (utcnow(), campaign_id))
                 return True
         return False
@@ -252,6 +275,7 @@ def install_tracker(app, client, admin_getter):
                 first_name = getattr(user, 'first_name', None)
                 timestamp = utcnow()
                 revoke_ids = []
+                check_target_ids = set()
                 with db() as c:
                     # Match the unique invite URL to one campaign. Existing members who merely click do not emit a join event.
                     matched = None
@@ -267,23 +291,23 @@ def install_tracker(app, client, admin_getter):
                                 c.execute("INSERT INTO members(campaign_id,user_id,username,first_name,joined_at,last_join_at,is_member,join_count) VALUES(?,?,?,?,?,?,1,1)", (matched['id'], uid, username, first_name, timestamp, timestamp))
                                 etype = 'joined'
                             c.execute("INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)", (matched['id'], uid, username, etype, timestamp, 'Attributed to campaign invite'))
-                            # Count unique attributed user IDs (not clicks or rejoin events).
-                            total_unique = c.execute("SELECT COUNT(*) n FROM members WHERE campaign_id=?", (matched['id'],)).fetchone()['n']
-                            current_campaign = c.execute("SELECT target,status FROM campaigns WHERE id=?", (matched['id'],)).fetchone()
-                            if current_campaign and current_campaign['status'] == 'active' and total_unique >= current_campaign['target']:
-                                c.execute("UPDATE campaigns SET status='completed', completed_at=? WHERE id=?", (timestamp, matched['id']))
-                                revoke_ids.append(matched['id'])
+                            # Check after this transaction: target means CURRENT active members.
+                            check_target_ids.add(int(matched['id']))
                         else:
                             # Rejoins/leaves of already-attributed members are logged, but unrelated joins never enter campaign totals.
                             known = c.execute("SELECT campaign_id FROM members WHERE user_id=? AND campaign_id IN (SELECT id FROM campaigns WHERE destination_id=?)", (uid, chat_id)).fetchall()
                             for row in known:
                                 c.execute("UPDATE members SET is_member=1,left_at=NULL,last_join_at=?,join_count=join_count+1,username=?,first_name=? WHERE campaign_id=? AND user_id=?", (timestamp, username, first_name, row['campaign_id'], uid))
                                 c.execute("INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)", (row['campaign_id'], uid, username, 'rejoined', timestamp, 'Rejoin observed; original campaign attribution retained'))
+                                check_target_ids.add(int(row['campaign_id']))
                     elif event.user_left or event.user_kicked:
                         known = c.execute("SELECT campaign_id FROM members WHERE user_id=? AND campaign_id IN (SELECT id FROM campaigns WHERE destination_id=?)", (uid, chat_id)).fetchall()
                         for row in known:
                             c.execute("UPDATE members SET is_member=0,left_at=? WHERE campaign_id=? AND user_id=?", (timestamp, row['campaign_id'], uid))
                             c.execute("INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)", (row['campaign_id'], uid, username, 'left' if event.user_left else 'kicked', timestamp, None))
+                for cid in check_target_ids:
+                    if finish_if_target_reached(cid):
+                        revoke_ids.append(cid)
                 for cid in revoke_ids:
                     asyncio.create_task(revoke_campaign(cid))
             except Exception as exc:

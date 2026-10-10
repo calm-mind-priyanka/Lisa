@@ -6,7 +6,7 @@ from telethon.tl.types import (
     MessageEntityUrl, MessageEntityTextUrl, MessageEntityMention,
     UserStatusOnline, UserStatusOffline
 )
-import os, asyncio, json, threading, time, random, sys, logging
+import os, asyncio, json, time, random, sys, logging
 from fastapi import FastAPI
 import uvicorn
 from datetime import datetime, timedelta, timezone
@@ -28,11 +28,6 @@ log = logging.getLogger("bot")
 # Keep-alive API (Koyeb / Render)
 # =========================
 app = FastAPI()
-
-def run_web():
-    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")
-
-threading.Thread(target=run_web, daemon=True).start()
 
 # =========================
 # Load Credentials & Config
@@ -498,9 +493,23 @@ async def main():
         raise RuntimeError("Missing Telegram credentials. Configure API_ID, API_HASH, SESSION, and PRIMARY_ADMIN in Koyeb environment variables.")
     await client.start()
     asyncio.create_task(dm_cleanup_watcher())
-    log.info("✅ Telegram userbot started successfully.")
-    print("✅ Bot running...")
-    await client.run_until_disconnected()
+    log.info("Telegram userbot started successfully.")
+    port = int(os.getenv("PORT", "8080"))
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning", access_log=False)
+    server = uvicorn.Server(config)
+    # Keep the HTTP app and Telethon on one asyncio loop. Running Uvicorn in a
+    # separate thread breaks async Telegram calls made by dashboard requests.
+    server_task = asyncio.create_task(server.serve())
+    client_task = asyncio.create_task(client.run_until_disconnected())
+    log.info("Campaign dashboard listening on port %s", port)
+    done, _ = await asyncio.wait({server_task, client_task}, return_when=asyncio.FIRST_COMPLETED)
+    if client_task in done:
+        server.should_exit = True
+        await server_task
+        client_task.result()
+    if server_task in done:
+        await client.disconnect()
+        server_task.result()
 
 if __name__ == "__main__":
     try:
