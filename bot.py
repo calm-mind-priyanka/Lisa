@@ -28,9 +28,6 @@ log = logging.getLogger("bot")
 # Keep-alive API (Koyeb / Render)
 # =========================
 app = FastAPI()
-@app.get("/")
-async def root():
-    return {"status": "Bot is alive and running!"}
 
 def run_web():
     uvicorn.run(app, host="0.0.0.0", port=8080, log_level="warning")
@@ -42,23 +39,19 @@ threading.Thread(target=run_web, daemon=True).start()
 # =========================
 CONFIG_FILE = "bot_transfer.json"
 
-if os.path.exists(CONFIG_FILE):
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            API_ID = data.get("API_ID")
-            API_HASH = data.get("API_HASH")
-            SESSION = data.get("SESSION")
-            PRIMARY_ADMIN = data.get("PRIMARY_ADMIN")
-    except Exception as e:
-        log.error(f"Error loading {CONFIG_FILE}: {e}")
-else:
-    API_ID = 38723719
-    API_HASH = "248c4dd61dca4d40bc997e89ef85b58d"
-    SESSION = "1BVtsOMYBu3KUs-xxkwQVXf5ZacEAoGpyuAYZyOThst79cpgjj-9SnpIzdSp3-8gU_r19oN5mDdOsRS8DCMqFn1el00bGBxTlSQYabwPwIJHQiXBhZv-1KmIESf9Y93FGnVWnarOzaHW3XrfrQZTTf5HYcdoMDyWreyd2KQq9CznAlFh47dR049-0o51a8ZYQyaRWVziegksG29TIXuK1JzPH3g29_H6A6Fsfsm2_SvApsY5xT0vZjdZR2ARCKdx3_Cm6IHgCLCZBOfh69g31EFjZHYoHd3ikXnVuMeyQkQK0Efoqp3WR8HhjtbghVRbwNLsSf-o_1EMWvWUYbx_5funtd67GGxo="
-    PRIMARY_ADMIN = 8646485823
-
-SECONDARY_ADMIN = 8646485823  # Real secondary admin ID
+# Secrets must be supplied through Koyeb environment variables. A legacy
+# bot_transfer.json is still supported for existing deployments, but secrets
+# are never embedded in source code.
+try:
+    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+        _config = json.load(f)
+except (OSError, json.JSONDecodeError):
+    _config = {}
+API_ID = int(os.getenv("API_ID", _config.get("API_ID") or 0))
+API_HASH = os.getenv("API_HASH", _config.get("API_HASH") or "")
+SESSION = os.getenv("SESSION", _config.get("SESSION") or "")
+PRIMARY_ADMIN = int(os.getenv("PRIMARY_ADMIN", _config.get("PRIMARY_ADMIN") or 0))
+SECONDARY_ADMIN = int(os.getenv("SECONDARY_ADMIN", PRIMARY_ADMIN or 0))
 
 # =========================
 # Files & State Management
@@ -175,7 +168,15 @@ delete_rl = RateLimiter(rate_delete_interval, jitter=0.6)
 # =========================
 # Telegram Client Initialization
 # =========================
-client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
+if not (API_ID and API_HASH and SESSION and PRIMARY_ADMIN):
+    log.warning("Telegram credentials are missing. Set API_ID, API_HASH, SESSION, and PRIMARY_ADMIN in Koyeb environment variables.")
+
+client = TelegramClient(StringSession(SESSION), API_ID or 1, API_HASH or "missing-api-hash")
+
+# Campaign tracker routes and join/leave event handler share this same FastAPI
+# app and Telethon client; no second web service is created.
+from tracker import install_tracker
+install_tracker(app, client, lambda: PRIMARY_ADMIN)
 
 admin_dm_pending = {}
 
@@ -493,6 +494,8 @@ async def message_handler(event):
 # Main Execution
 # =========================
 async def main():
+    if not (API_ID and API_HASH and SESSION and PRIMARY_ADMIN):
+        raise RuntimeError("Missing Telegram credentials. Configure API_ID, API_HASH, SESSION, and PRIMARY_ADMIN in Koyeb environment variables.")
     await client.start()
     asyncio.create_task(dm_cleanup_watcher())
     log.info("✅ Telegram userbot started successfully.")
