@@ -59,9 +59,26 @@ def load_data():
     if os.path.exists(GROUPS_FILE):
         try:
             with open(GROUPS_FILE, "r", encoding="utf-8") as f:
-                groups = set(json.load(f))
+                raw_groups = json.load(f)
+            # Normalize persisted IDs: JSON string IDs and integer IDs must compare
+            # equally with Telethon's integer event.chat_id.
+            groups = set()
+            invalid_group_ids = []
+            for raw_gid in raw_groups:
+                try:
+                    groups.add(int(raw_gid))
+                except (TypeError, ValueError):
+                    invalid_group_ids.append(str(raw_gid))
+            log.info(
+                "GROUPS_LOADED file=%s count=%d ids=%s invalid_count=%d",
+                GROUPS_FILE, len(groups), sorted(groups), len(invalid_group_ids)
+            )
+            if invalid_group_ids:
+                log.warning("GROUPS_INVALID_IDS values=%s", invalid_group_ids[:20])
         except Exception as e:
-            log.error(f"Error loading groups: {e}")
+            log.exception("GROUPS_LOAD_FAILED file=%s error=%s", GROUPS_FILE, e)
+    else:
+        log.warning("GROUPS_FILE_MISSING file=%s; group auto-replies need /addgroup", GROUPS_FILE)
 
     defaults = {
         "reply_msg": "🤖 Bot is active!",
@@ -422,51 +439,78 @@ async def secondary_transfer(e):
 @client.on(events.NewMessage(incoming=True))
 async def message_handler(event):
     global emergency_stop, flood_pause_until, bot_active
+    chat_id = event.chat_id
+    sender_id = event.sender_id
+    # Do not log message text; IDs and decision reasons are enough to diagnose.
     try:
+        log.info(
+            "INCOMING_MESSAGE chat_id=%s sender_id=%s private=%s text_len=%s",
+            chat_id, sender_id, event.is_private, len(event.raw_text or "")
+        )
         now_ts = time.time()
-        if now_ts < flood_pause_until or emergency_stop or not bot_active:
+        if now_ts < flood_pause_until:
+            log.info("AUTO_REPLY_SKIPPED reason=flood_pause chat_id=%s seconds_left=%d",
+                     chat_id, int(flood_pause_until - now_ts))
+            return
+        if emergency_stop:
+            log.info("AUTO_REPLY_SKIPPED reason=emergency_stop chat_id=%s", chat_id)
+            return
+        if not bot_active:
+            log.info("AUTO_REPLY_SKIPPED reason=bot_inactive chat_id=%s", chat_id)
             return
 
         if event.is_private:
             if pm_msg:
+                log.info("PM_AUTO_REPLY_ATTEMPT chat_id=%s sender_id=%s", chat_id, sender_id)
                 await asyncio.sleep(random.uniform(0.5, 1.2))
                 await send_rl.wait()
                 m = await event.reply(pm_msg)
+                log.info("PM_AUTO_REPLY_SUCCESS chat_id=%s reply_message_id=%s", chat_id, m.id)
                 if delay > 0:
                     asyncio.create_task(safe_delete(m, min(delay, 120)))
+            else:
+                log.info("PM_AUTO_REPLY_SKIPPED reason=no_pm_message chat_id=%s", chat_id)
             return
 
-        if event.chat_id not in groups:
+        if chat_id not in groups:
+            log.info("AUTO_REPLY_SKIPPED reason=group_not_watched chat_id=%s watched=%s",
+                     chat_id, chat_id in groups)
             return
 
-        # 1. Block messages sent by any admin user ID or your own userbot account
-        if event.sender_id in (PRIMARY_ADMIN, SECONDARY_ADMIN, client.uid):
+        # Block messages sent by admin IDs or the userbot itself.
+        if sender_id in (PRIMARY_ADMIN, SECONDARY_ADMIN, client.uid):
+            log.info("AUTO_REPLY_SKIPPED reason=excluded_sender chat_id=%s sender_id=%s", chat_id, sender_id)
             return
 
-        # 2. Block any message explicitly flagged as a bot by Telegram
-        if event.sender and getattr(event.sender, "bot", False):
+        sender = event.sender
+        if sender and getattr(sender, "bot", False):
+            log.info("AUTO_REPLY_SKIPPED reason=sender_is_bot chat_id=%s sender_id=%s", chat_id, sender_id)
             return
 
-        # 3. Block anonymous channel admins or service/bot senders
         if event.is_channel and event.out:
+            log.info("AUTO_REPLY_SKIPPED reason=outgoing_channel_message chat_id=%s", chat_id)
             return
-            
+
         if event.message.entities:
             for ent in event.message.entities:
                 if isinstance(ent, (MessageEntityUrl, MessageEntityTextUrl, MessageEntityMention)):
+                    log.info("AUTO_REPLY_SKIPPED reason=url_or_mention_entity chat_id=%s entity=%s",
+                             chat_id, type(ent).__name__)
                     return
 
-        if now_ts - last_reply.get(event.chat_id, 0) < gap:
+        elapsed = now_ts - last_reply.get(chat_id, 0)
+        if elapsed < gap:
+            log.info("AUTO_REPLY_SKIPPED reason=reply_gap chat_id=%s seconds_left=%d",
+                     chat_id, int(gap - elapsed))
             return
 
+        log.info("AUTO_REPLY_ATTEMPT chat_id=%s sender_id=%s", chat_id, sender_id)
         await asyncio.sleep(random.uniform(0.8, 1.8))
-        last_reply[event.chat_id] = time.time()
-        
-        # Guarantees exact reference reply to the specific incoming user message
+        last_reply[chat_id] = time.time()
         await send_rl.wait()
         m = await event.reply(msg)
-        
-        last_sent_messages[event.chat_id] = m
+        last_sent_messages[chat_id] = m
+        log.info("AUTO_REPLY_SUCCESS chat_id=%s reply_message_id=%s", chat_id, m.id)
         if delay > 0:
             asyncio.create_task(safe_delete(m, delay))
 
@@ -474,16 +518,16 @@ async def message_handler(event):
         wait_sec = int(getattr(fwe, "seconds", 30))
         flood_pause_until = time.time() + wait_sec
         resume_time = fmt_ist(datetime.fromtimestamp(time.time() + wait_sec, tz=timezone.utc))
-        log.warning(f"Flood wait triggered: sleeping for {wait_sec}s")
+        log.warning("AUTO_REPLY_FLOOD_WAIT chat_id=%s seconds=%s", chat_id, wait_sec)
         await notify_admin(f"⚠️ Flood wait triggered! Pausing for {wait_sec}s until {resume_time}.")
         await asyncio.sleep(wait_sec)
         flood_pause_until = 0
         await notify_admin("✅ Flood wait over. Bot resumed.")
 
     except ChatWriteForbiddenError:
-        log.warning(f"Chat write forbidden in chat {event.chat_id}")
+        log.exception("AUTO_REPLY_FAILED reason=chat_write_forbidden chat_id=%s sender_id=%s", chat_id, sender_id)
     except Exception as e:
-        log.error(f"[Handler Error] {e}")
+        log.exception("AUTO_REPLY_FAILED chat_id=%s sender_id=%s error=%s", chat_id, sender_id, e)
 
 # =========================
 # Main Execution
@@ -492,6 +536,10 @@ async def main():
     if not (API_ID and API_HASH and SESSION and PRIMARY_ADMIN):
         raise RuntimeError("Missing Telegram credentials. Configure API_ID, API_HASH, SESSION, and PRIMARY_ADMIN in Koyeb environment variables.")
     await client.start()
+    log.info(
+        "TELEGRAM_CONNECTED user_id=%s watched_group_count=%d watched_group_ids=%s bot_active=%s emergency_stop=%s",
+        client.uid, len(groups), sorted(groups), bot_active, emergency_stop
+    )
     start_tracker_reconciler()
     asyncio.create_task(dm_cleanup_watcher())
     log.info("Telegram userbot started successfully.")
