@@ -15,7 +15,10 @@ from urllib.parse import urlparse
 
 from fastapi import Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
-from telethon.tl.functions.messages import ExportChatInviteRequest, EditExportedChatInviteRequest
+from telethon.tl.functions.messages import ExportChatInviteRequest, EditExportedChatInviteRequest, GetChatInviteImportersRequest
+from telethon.tl import types as telethon_types
+from telethon import utils as telethon_utils
+from telethon.errors import UserNotParticipantError
 
 log = logging.getLogger("campaign_tracker")
 DB_PATH = os.getenv("TRACKER_DB_PATH", "tracker.sqlite3")
@@ -148,32 +151,26 @@ def normalize_invite_link(value):
 
 
 def _join_invite_link(event):
-    """Extract the invite link from Telethon ChatAction's service message.
+    """Extract an invite URL only when the event actually exposes one.
 
-    MessageActionChatJoinedByLink exposes `invite_link` (an ExportedChatInvite),
-    not `invite`. Keep fallbacks for Telethon versions/event wrappers that expose
-    the service-action data through a convenience property.
+    Telegram's MessageActionChatJoinedByLink constructor does not contain the
+    invite URL in current MTProto schemas. Do not infer a campaign from the
+    action's inviter_id. Campaign attribution is therefore reconciled through
+    messages.getChatInviteImporters below.
     """
     candidates = []
-    try:
-        action_message = getattr(event, "action_message", None)
-        action = getattr(action_message, "action", None)
-        candidates.append(getattr(action, "invite_link", None))
-        # Compatibility fallback for wrappers/versions that expose `invite`.
-        candidates.append(getattr(action, "invite", None))
-    except Exception:
-        pass
-    try:
-        candidates.append(getattr(event, "invite_link", None))
-    except Exception:
-        pass
-    for candidate in candidates:
+    action_message = getattr(event, "action_message", None)
+    action = getattr(action_message, "action", None)
+    for owner, attr in ((action, "invite_link"), (action, "invite"), (event, "invite_link")):
+        candidate = getattr(owner, attr, None) if owner is not None else None
         if candidate:
-            link = getattr(candidate, "link", None)
-            if link:
-                return normalize_invite_link(link)
-            if isinstance(candidate, str):
-                return normalize_invite_link(candidate)
+            candidates.append(candidate)
+    for candidate in candidates:
+        link = getattr(candidate, "link", None)
+        if link:
+            return normalize_invite_link(link)
+        if isinstance(candidate, str):
+            return normalize_invite_link(candidate)
     return None
 
 
@@ -314,7 +311,168 @@ def install_tracker(app, client, admin_getter):
                 return True
         return False
 
-    # Telegram membership actions are authoritative; a link click alone is never counted as a join.
+    async def reconcile_campaign_importers():
+        """Poll Telegram's invite-importer API because ChatAction lacks invite URLs.
+
+        This records only users returned by Telegram for the exact campaign link.
+        Membership is checked separately; inability to check membership is not
+        treated as proof that a user left or is currently present.
+        """
+        if client is None:
+            return
+        while True:
+            try:
+                if not getattr(client, "is_connected", lambda: False)():
+                    await asyncio.sleep(15)
+                    continue
+                with db() as c:
+                    campaigns = c.execute(
+                        "SELECT * FROM campaigns WHERE status='active' ORDER BY id"
+                    ).fetchall()
+                for camp in campaigns:
+                    try:
+                        entity = await client.get_entity(int(camp["destination_id"]))
+                        offset_date = 0
+                        offset_user = telethon_types.InputUserEmpty()
+                        seen_pages = set()
+                        while True:
+                            result = await client(GetChatInviteImportersRequest(
+                                peer=entity,
+                                link=camp["invite_link"],
+                                offset_date=offset_date,
+                                offset_user=offset_user,
+                                limit=100,
+                            ))
+                            importers = list(getattr(result, "importers", []) or [])
+                            users = {int(u.id): u for u in (getattr(result, "users", []) or []) if getattr(u, "id", None) is not None}
+                            if not importers:
+                                break
+                            page_marker = (int(getattr(importers[0], "user_id", 0) or 0), int(getattr(importers[-1], "user_id", 0) or 0), len(importers))
+                            if page_marker in seen_pages:
+                                log.warning("Invite-importer pagination repeated for campaign %s", camp["id"])
+                                break
+                            seen_pages.add(page_marker)
+                            for importer in importers:
+                                uid = int(getattr(importer, "user_id", 0) or 0)
+                                user = users.get(uid)
+                                if not uid or not user or getattr(user, "bot", False):
+                                    continue
+                                join_date = getattr(importer, "date", None)
+                                if join_date is not None:
+                                    if join_date.tzinfo is None:
+                                        join_date = join_date.replace(tzinfo=timezone.utc)
+                                    joined_at = join_date.astimezone(timezone.utc).isoformat(timespec="seconds")
+                                else:
+                                    joined_at = utcnow()
+                                username = getattr(user, "username", None)
+                                first_name = getattr(user, "first_name", None)
+                                with db() as c:
+                                    previous = c.execute(
+                                        "SELECT * FROM members WHERE campaign_id=? AND user_id=?",
+                                        (camp["id"], uid),
+                                    ).fetchone()
+                                    already_active = bool(previous is not None and previous["is_member"])
+                                    if already_active:
+                                        # The live ChatAction handler maintains current membership. Avoid
+                                        # one Telegram permissions request per known member on every poll.
+                                        c.execute(
+                                            "UPDATE members SET username=?,first_name=? WHERE campaign_id=? AND user_id=?",
+                                            (username, first_name, camp["id"], uid),
+                                        )
+                                if already_active:
+                                    # Also close a campaign on startup if its persisted current-member
+                                    # count already meets the target but closure had not completed.
+                                    if finish_if_target_reached(int(camp["id"])):
+                                        await revoke_campaign(int(camp["id"]))
+                                    continue
+                                try:
+                                    await client.get_permissions(entity, user)
+                                    is_member = True
+                                except UserNotParticipantError:
+                                    is_member = False
+                                except Exception as membership_exc:
+                                    log.warning(
+                                        "Could not verify current membership for campaign %s (error=%s)",
+                                        camp["id"], type(membership_exc).__name__
+                                    )
+                                    # Keep existing state, and don't insert an unverifiable new record.
+                                    with db() as c:
+                                        existing = c.execute("SELECT 1 FROM members WHERE campaign_id=? AND user_id=?", (camp["id"], uid)).fetchone()
+                                    if not existing:
+                                        continue
+                                    is_member = None
+                                with db() as c:
+                                    previous = c.execute(
+                                        "SELECT * FROM members WHERE campaign_id=? AND user_id=?",
+                                        (camp["id"], uid),
+                                    ).fetchone()
+                                    if previous is None:
+                                        c.execute(
+                                            "INSERT INTO members(campaign_id,user_id,username,first_name,joined_at,last_join_at,left_at,is_member,join_count) VALUES(?,?,?,?,?,?,NULL,?,1)",
+                                            (camp["id"], uid, username, first_name, joined_at, joined_at, int(is_member)),
+                                        )
+                                        c.execute(
+                                            "INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)",
+                                            (camp["id"], uid, username, "joined", joined_at,
+                                             "Attributed by Telegram invite-importer API; current membership verified" if is_member else "Historical invite importer; not currently a member; past leave event unavailable"),
+                                        )
+                                    else:
+                                        # Keep the original first-join time and lifetime uniqueness.
+                                        if is_member is True and not previous["is_member"]:
+                                            c.execute(
+                                                "UPDATE members SET username=?,first_name=?,is_member=1,left_at=NULL,last_join_at=?,join_count=join_count+1 WHERE campaign_id=? AND user_id=?",
+                                                (username, first_name, joined_at, camp["id"], uid),
+                                            )
+                                            c.execute(
+                                                "INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)",
+                                                (camp["id"], uid, username, "rejoined", joined_at, "Membership restored by invite-importer reconciliation"),
+                                            )
+                                        elif is_member is False and previous["is_member"]:
+                                            c.execute(
+                                                "UPDATE members SET username=?,first_name=?,is_member=0 WHERE campaign_id=? AND user_id=?",
+                                                (username, first_name, camp["id"], uid),
+                                            )
+                                            # Do not fabricate a leave event or timestamp from an importer list.
+                                        else:
+                                            c.execute(
+                                                "UPDATE members SET username=?,first_name=? WHERE campaign_id=? AND user_id=?",
+                                                (username, first_name, camp["id"], uid),
+                                            )
+                                if is_member is True and finish_if_target_reached(int(camp["id"])):
+                                    await revoke_campaign(int(camp["id"]))
+                            if len(importers) < 100:
+                                break
+                            last = importers[-1]
+                            last_uid = int(getattr(last, "user_id", 0) or 0)
+                            last_user = users.get(last_uid)
+                            if not last_user:
+                                break
+                            offset_date_value = getattr(last, "date", None)
+                            if offset_date_value is None:
+                                break
+                            offset_date = int(offset_date_value.timestamp())
+                            offset_user = telethon_utils.get_input_user(await client.get_input_entity(last_user))
+                    except Exception as exc:
+                        log.warning("Invite-importer reconciliation failed for campaign %s (error=%s)", camp["id"], type(exc).__name__)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.exception("Campaign importer reconciliation loop failed (error=%s)", type(exc).__name__)
+            await asyncio.sleep(60)
+
+    def start_reconciler():
+        """Start one background importer-reconciliation task after client.start()."""
+        nonlocal reconciler_task
+        if client is None:
+            return None
+        if reconciler_task is None or reconciler_task.done():
+            reconciler_task = asyncio.create_task(reconcile_campaign_importers(), name="campaign-importer-reconciler")
+        return reconciler_task
+
+    reconciler_task = None
+
+    # Telegram membership actions remain useful for departures and known-user rejoins.
+    # New join attribution comes from getChatInviteImporters, not an unavailable URL field.
     if client is not None:
         from telethon import events
 
@@ -390,6 +548,13 @@ def install_tracker(app, client, admin_getter):
                     elif event.user_left or event.user_kicked:
                         known = c.execute("SELECT campaign_id FROM members WHERE user_id=? AND campaign_id IN (SELECT id FROM campaigns WHERE destination_id=?)", (uid, chat_id)).fetchall()
                         for row in known:
+                            member = c.execute(
+                                "SELECT is_member FROM members WHERE campaign_id=? AND user_id=?",
+                                (row["campaign_id"], uid),
+                            ).fetchone()
+                            # Duplicate leave/kick updates must not create duplicate history rows.
+                            if not member or not member["is_member"]:
+                                continue
                             c.execute("UPDATE members SET is_member=0,left_at=? WHERE campaign_id=? AND user_id=?", (timestamp, row['campaign_id'], uid))
                             c.execute("INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)", (row['campaign_id'], uid, username, 'left' if event.user_left else 'kicked', timestamp, None))
                 for cid in check_target_ids:
@@ -399,3 +564,5 @@ def install_tracker(app, client, admin_getter):
                     asyncio.create_task(revoke_campaign(cid))
             except Exception as exc:
                 log.exception("Telegram membership update failed (%s)", type(exc).__name__)
+
+    return start_reconciler

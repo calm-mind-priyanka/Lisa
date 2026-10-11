@@ -43,30 +43,10 @@ The original archive contained Telegram session/API credentials embedded in `bot
 
 ## Join attribution troubleshooting notes
 
-The tracker reads invite-link joins from Telethon's `events.ChatAction` service
-message. For a `MessageActionChatJoinedByLink`, the exported invite is exposed
-as `action.invite_link`; it is not named `action.invite`. The tracker now reads
-the documented field, keeps compatibility fallbacks, normalizes equivalent
-Telegram invite URL host/trailing-slash forms, and matches only within the
-destination chat.
+Telegram's documented `MessageActionChatJoinedByLink` service action does not include the invite URL. The tracker therefore does not depend on `action.invite_link` being present. It polls Telegram's `messages.getChatInviteImporters` API for each active campaign's exact invite URL, which can return user-level importer records when the logged-in user account has the necessary access.
 
-The dashboard's lifetime unique count is based on users recorded in `members`.
-Current members counts only rows currently marked as members. Clicks are never
-counted as joins. Duplicate join updates for a user already marked as a member
-do not create extra join/rejoin events.
+The importer API is not a guarantee that every join can be attributed: Telegram access permissions, invite-link type, chat type, request approval flows, expired/revoked links, and API availability can affect results. Importer records are not the same as an aggregate invite count. Historical importer records can help recover attributed users, but they cannot reconstruct missing leave/kick timestamps. Current membership checks are performed for newly discovered users and previously inactive users; live `ChatAction` events maintain known members while the service is online.
 
-Telegram's MTProto API includes `messages.getChatInviteImporters`, which can
-return users who joined using a specific invite link when the logged-in user
-has the required admin access. The tracker does not automatically import
-historical importers: doing so safely requires reconciling historical dates
-and users while not guessing whether each person is still a member. The
-dashboard's existing database cannot reconstruct past leaves/kicks or current
-membership solely from Telegram's aggregate “joined” count. Historical
-reconciliation should only be performed from importer records returned by
-Telegram, never by copying an aggregate count into member rows.
+The reconciler starts after the Telethon client connects and polls about once per minute. API errors are logged without printing credentials. The exact Telethon version is determined by the installed dependency at deployment time because `requirements.txt` does not pin a version. Check Koyeb build logs or run `python -c "import telethon; print(telethon.__version__)"` in the deployed image if version-specific diagnosis is needed.
 
-The `requirements.txt` currently leaves Telethon unpinned, so the exact
-Telethon version installed in a deployed Koyeb image cannot be inferred from
-the repository alone. Check the build logs or run `python -c "import telethon;
-print(telethon.__version__)"` in the deployed image when diagnosing version-
-specific behavior.
+No genuine Telegram join or Koyeb deployment can be verified from a local ZIP-only test. A live test with a new campaign and a new member account is still required.
