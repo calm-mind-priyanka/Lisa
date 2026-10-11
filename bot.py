@@ -184,6 +184,8 @@ if not (API_ID and API_HASH and SESSION and PRIMARY_ADMIN):
     log.warning("Telegram credentials are missing. Set API_ID, API_HASH, SESSION, and PRIMARY_ADMIN in Koyeb environment variables.")
 
 client = TelegramClient(StringSession(SESSION), API_ID or 1, API_HASH or "missing-api-hash")
+# Filled after Telegram connects; TelegramClient itself has no `.uid` attribute.
+MY_USER_ID = None
 
 # Campaign tracker routes and join/leave event handler share this same FastAPI
 # app and Telethon client; no second web service is created.
@@ -478,7 +480,7 @@ async def message_handler(event):
             return
 
         # Block messages sent by admin IDs or the userbot itself.
-        if sender_id in (PRIMARY_ADMIN, SECONDARY_ADMIN, client.uid):
+        if sender_id in (PRIMARY_ADMIN, SECONDARY_ADMIN, MY_USER_ID):
             log.info("AUTO_REPLY_SKIPPED reason=excluded_sender chat_id=%s sender_id=%s", chat_id, sender_id)
             return
 
@@ -533,12 +535,15 @@ async def message_handler(event):
 # Main Execution
 # =========================
 async def main():
+    global MY_USER_ID
     if not (API_ID and API_HASH and SESSION and PRIMARY_ADMIN):
         raise RuntimeError("Missing Telegram credentials. Configure API_ID, API_HASH, SESSION, and PRIMARY_ADMIN in Koyeb environment variables.")
     await client.start()
+    me = await client.get_me()
+    MY_USER_ID = me.id
     log.info(
         "TELEGRAM_CONNECTED user_id=%s watched_group_count=%d watched_group_ids=%s bot_active=%s emergency_stop=%s",
-        client.uid, len(groups), sorted(groups), bot_active, emergency_stop
+        MY_USER_ID, len(groups), sorted(groups), bot_active, emergency_stop
     )
     start_tracker_reconciler()
     asyncio.create_task(dm_cleanup_watcher())
