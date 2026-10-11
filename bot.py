@@ -171,7 +171,7 @@ client = TelegramClient(StringSession(SESSION), API_ID or 1, API_HASH or "missin
 # Campaign tracker routes and join/leave event handler share this same FastAPI
 # app and Telethon client; no second web service is created.
 from tracker import install_tracker
-install_tracker(app, client, lambda: PRIMARY_ADMIN)
+start_tracker_reconciler = install_tracker(app, client, lambda: PRIMARY_ADMIN)
 
 admin_dm_pending = {}
 
@@ -492,6 +492,7 @@ async def main():
     if not (API_ID and API_HASH and SESSION and PRIMARY_ADMIN):
         raise RuntimeError("Missing Telegram credentials. Configure API_ID, API_HASH, SESSION, and PRIMARY_ADMIN in Koyeb environment variables.")
     await client.start()
+    start_tracker_reconciler()
     asyncio.create_task(dm_cleanup_watcher())
     log.info("Telegram userbot started successfully.")
     port = int(os.getenv("PORT", "8080"))

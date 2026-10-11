@@ -40,12 +40,13 @@ Set these in the service settings (never commit them to source):
 
 The original archive contained Telegram session/API credentials embedded in `bot.py`. They have been removed from the source and must be supplied as environment variables or a private `bot_transfer.json`. Because the old session string was included in the archive shared here, revoke that Telegram session and generate a fresh session before deploying. Never share or commit session strings.
 
-## Added dashboard features
 
-- **Separate campaign captions:** The dashboard has editable Campaign Start Intro and Mission Successful Outro templates. They are additional messages sent to the campaign's Telegram destination; they do not replace the existing tracker behavior. Supported placeholders are `{campaign_name}`, `{target}`, `{current_joins}`, `{started_at}`, and `{completed_at}`.
-- **Target reached:** The original close-at-target behavior is preserved. When the current tracked member count reaches the target, the campaign is marked completed, its invite link is revoked on a best-effort basis, the `/r/<id>` tracking route stops redirecting, and the separate success outro is sent once when Telegram allows it.
-- **Delete / Archive Campaign:** Each dashboard campaign card has a confirmation-protected archive button. This stops its tracking route and attempts to revoke its invite, while preserving campaign, member, and event history in SQLite. It is a soft archive, not a destructive database delete.
-- **Indian Standard Time:** Dashboard campaign creation/completion timestamps and member-event history are displayed in `Asia/Kolkata` (IST). Stored timestamps remain ISO UTC values so existing records are preserved and can be converted consistently.
-- **Safe database migration:** New template settings and one-time caption flags are added with additive migrations; existing campaign and history rows are not dropped or reset.
+## Join attribution troubleshooting notes
 
-Caption delivery depends on the Telegram userbot being connected and having permission to post in the destination. If Telegram rejects a caption, the delivery flag is reset so a later attempt can be made; successful captions are guarded against duplicate sends.
+Telegram's documented `MessageActionChatJoinedByLink` service action does not include the invite URL. The tracker therefore does not depend on `action.invite_link` being present. It polls Telegram's `messages.getChatInviteImporters` API for each active campaign's exact invite URL, which can return user-level importer records when the logged-in user account has the necessary access.
+
+The importer API is not a guarantee that every join can be attributed: Telegram access permissions, invite-link type, chat type, request approval flows, expired/revoked links, and API availability can affect results. Importer records are not the same as an aggregate invite count. Historical importer records can help recover attributed users, but they cannot reconstruct missing leave/kick timestamps. Current membership checks are performed for newly discovered users and previously inactive users; live `ChatAction` events maintain known members while the service is online.
+
+The reconciler starts after the Telethon client connects and polls about once per minute. API errors are logged without printing credentials. The exact Telethon version is determined by the installed dependency at deployment time because `requirements.txt` does not pin a version. Check Koyeb build logs or run `python -c "import telethon; print(telethon.__version__)"` in the deployed image if version-specific diagnosis is needed.
+
+No genuine Telegram join or Koyeb deployment can be verified from a local ZIP-only test. A live test with a new campaign and a new member account is still required.
