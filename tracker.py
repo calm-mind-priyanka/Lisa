@@ -6,38 +6,26 @@ import html
 import os
 import sqlite3
 import time
-import logging
-import re
-from contextlib import contextmanager
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, PlainTextResponse
-from telethon.tl.functions.messages import ExportChatInviteRequest, EditExportedChatInviteRequest, GetChatInviteImportersRequest
-from telethon.tl import types as telethon_types
-from telethon import utils as telethon_utils
-from telethon.errors import UserNotParticipantError
+from telethon.tl.functions.messages import ExportChatInviteRequest, EditExportedChatInviteRequest
 
-log = logging.getLogger("campaign_tracker")
 DB_PATH = os.getenv("TRACKER_DB_PATH", "tracker.sqlite3")
 TRACKER_PASSWORD = os.getenv("TRACKER_ADMIN_PASSWORD", "")
 COOKIE_SECRET = os.getenv("TRACKER_SECRET_KEY", "")
 
 
-@contextmanager
 def db():
-    """Yield a configured SQLite connection and always close it after commit/rollback."""
     con = sqlite3.connect(DB_PATH, timeout=20)
     con.row_factory = sqlite3.Row
-    try:
-        con.execute("PRAGMA journal_mode=WAL")
-        con.execute("PRAGMA foreign_keys=ON")
-        with con:
-            yield con
-    finally:
-        con.close()
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA foreign_keys=ON")
+    return con
 
 
 def init_db():
@@ -78,7 +66,15 @@ def init_db():
             details TEXT
         );
         CREATE INDEX IF NOT EXISTS idx_events_campaign ON events(campaign_id, id DESC);
+        CREATE TABLE IF NOT EXISTS tracker_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '');
         """)
+        # Additive migration only: keep existing campaign, member, and event history intact.
+        campaign_columns = {row["name"] for row in c.execute("PRAGMA table_info(campaigns)").fetchall()}
+        for column in ("start_intro_sent", "success_outro_sent"):
+            if column not in campaign_columns:
+                c.execute(f"ALTER TABLE campaigns ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
+        c.execute("INSERT OR IGNORE INTO tracker_settings(key,value) VALUES(?,?)", ("start_intro_template", "🎬 ═══ MISSION INITIATED ═══ 🎬\n\n🚀 CAMPAIGN STARTED!\n\n📌 Campaign: {campaign_name}\n🎯 Mission Target: {target}\n👥 Current Joins: {current_joins}\n🕒 Started At: {started_at}\n\n🔥 The mission has officially begun!"))
+        c.execute("INSERT OR IGNORE INTO tracker_settings(key,value) VALUES(?,?)", ("success_outro_template", "🏆 ═══ MISSION SUCCESSFUL ═══ 🏆\n\n🎯 Campaign: {campaign_name}\n✅ Target Achieved: {target}\n👥 Final Joins: {current_joins}\n🕒 Completed At: {completed_at}\n\n🎉 MISSION ACCOMPLISHED!\n\nThank you to everyone who participated!"))
 
 
 def _public_base_url(request=None):
@@ -96,6 +92,22 @@ def _public_base_url(request=None):
 
 def utcnow():
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def format_ist(value):
+    """Format stored ISO timestamps as Indian Standard Time for dashboard display."""
+    if not value:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt = dt.astimezone(ZoneInfo("Asia/Kolkata"))
+        day = dt.day
+        suffix = "th" if 11 <= day % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(day % 10, "th")
+        return f"{day}{suffix} {dt.strftime('%B %Y, %-I:%M:%S %p')} IST"
+    except (ValueError, TypeError, OverflowError):
+        return str(value)
 
 
 def _token(payload):
@@ -129,53 +141,51 @@ def _page(title, body):
     </style></head><body><main>{body}</main></body></html>"""
 
 
-def normalize_invite_link(value):
-    """Normalize Telegram invite URLs without conflating distinct invite tokens."""
-    if not value:
-        return None
-    value = str(value).strip()
-    if not value:
-        return None
-    # Telegram may expose t.me, telegram.me, or www-prefixed variants.
-    candidate = value if "://" in value else "https://" + value
-    try:
-        parsed = urlparse(candidate)
-        host = (parsed.hostname or "").lower()
-        if host not in {"t.me", "www.t.me", "telegram.me", "www.telegram.me"}:
-            return value.rstrip("/")
-        path = re.sub(r"/+", "/", parsed.path or "").rstrip("/")
-        # Invite tokens are case-sensitive; preserve path exactly.
-        return "https://t.me" + path
-    except Exception:
-        return value.rstrip("/")
-
-
-def _join_invite_link(event):
-    """Extract an invite URL only when the event actually exposes one.
-
-    Telegram's MessageActionChatJoinedByLink constructor does not contain the
-    invite URL in current MTProto schemas. Do not infer a campaign from the
-    action's inviter_id. Campaign attribution is therefore reconciled through
-    messages.getChatInviteImporters below.
-    """
-    candidates = []
-    action_message = getattr(event, "action_message", None)
-    action = getattr(action_message, "action", None)
-    for owner, attr in ((action, "invite_link"), (action, "invite"), (event, "invite_link")):
-        candidate = getattr(owner, attr, None) if owner is not None else None
-        if candidate:
-            candidates.append(candidate)
-    for candidate in candidates:
-        link = getattr(candidate, "link", None)
-        if link:
-            return normalize_invite_link(link)
-        if isinstance(candidate, str):
-            return normalize_invite_link(candidate)
-    return None
-
-
 def install_tracker(app, client, admin_getter):
     init_db()
+
+    async def send_campaign_caption(campaign_id, kind):
+        flag = "start_intro_sent" if kind == "start" else "success_outro_sent"
+        template_key = "start_intro_template" if kind == "start" else "success_outro_template"
+        if client is None or not getattr(client, "is_connected", lambda: False)():
+            print(f"Cannot send {kind} campaign caption {campaign_id}: Telegram is not connected")
+            return
+        with db() as c:
+            camp = c.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+            if not camp or camp["status"] == "archived" or camp[flag]:
+                return
+            row = c.execute("SELECT value FROM tracker_settings WHERE key=?", (template_key,)).fetchone()
+            template = row["value"] if row else ""
+            if not template.strip():
+                return
+            # Claim once so duplicate events/restarts cannot send the same caption twice.
+            c.execute(f"UPDATE campaigns SET {flag}=1 WHERE id=? AND {flag}=0", (campaign_id,))
+            if c.execute("SELECT changes()").fetchone()[0] != 1:
+                return
+            active = c.execute("SELECT COUNT(*) n FROM members WHERE campaign_id=? AND is_member=1", (campaign_id,)).fetchone()["n"]
+            values = {
+                "campaign_name": camp["name"], "target": camp["target"],
+                "current_joins": active, "started_at": format_ist(camp["created_at"]),
+                "completed_at": format_ist(camp["completed_at"] or utcnow()),
+            }
+            try:
+                caption = template.format_map(values)
+            except (KeyError, ValueError):
+                caption = template
+            destination_id = camp["destination_id"]
+        try:
+            entity = await client.get_entity(int(destination_id))
+            await client.send_message(entity, caption)
+        except Exception as exc:
+            # Permit a later attempt if Telegram rejected the send.
+            with db() as c:
+                c.execute(f"UPDATE campaigns SET {flag}=0 WHERE id=?", (campaign_id,))
+            print(f"Could not send {kind} campaign caption {campaign_id}: {type(exc).__name__}")
+
+    async def close_campaign_and_send_outro(campaign_id):
+        # Preserve original behavior: attempt to revoke the invite, then send the separate outro.
+        await revoke_campaign(campaign_id)
+        await send_campaign_caption(campaign_id, "success")
 
     @app.get("/", response_class=HTMLResponse)
     async def tracker_root(request: Request):
@@ -231,17 +241,43 @@ def install_tracker(app, client, admin_getter):
             # The target is the current number of tracked campaign members, not
             # the lifetime number of different people who ever joined.
             pct = min(100, int(active * 100 / camp['target']))
-            state = "Closed at target" if camp['status'] == 'completed' else "Active"
-            state_class = 'completed' if camp['status'] == 'completed' else ''
+            state = "MISSION SUCCESSFUL" if camp['status'] == 'completed' else ("Archived" if camp['status'] == 'archived' else "Active")
+            state_class = 'completed' if camp['status'] in ('completed', 'archived') else ''
             target_label = "TARGET MET NOW" if active >= camp['target'] else "TARGET NOT MET"
             tracking_url = (public_base + '/r/' + str(camp['id'])) if public_base else ('/r/' + str(camp['id']))
-            event_rows = "".join(f"<tr><td>{html.escape(e['occurred_at'])}</td><td>{html.escape(e['event_type'])}</td><td>{html.escape(str(e['user_id'] or '—'))}</td><td>{html.escape('@'+e['username'] if e['username'] else '—')}</td></tr>" for e in evs) or "<tr><td colspan='4'>No confirmed member events yet.</td></tr>"
+            event_rows = "".join(f"<tr><td>{html.escape(format_ist(e['occurred_at']))}</td><td>{html.escape(e['event_type'])}</td><td>{html.escape(str(e['user_id'] or '—'))}</td><td>{html.escape('@'+e['username'] if e['username'] else '—')}</td></tr>" for e in evs) or "<tr><td colspan='4'>No confirmed member events yet.</td></tr>"
             cards.append(f"""<section class='card'><div style='display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap'><div><h2>#{camp['id']} — {html.escape(camp['name'])}</h2><p>{html.escape(camp['destination_title'])} · <span class='pill {state_class}'>{state}</span> · <strong>{target_label}</strong></p></div><div><small>Campaign tracking URL</small><br><div class='linkbox'><code>{html.escape(tracking_url)}</code><button type='button' class='secondary' onclick="navigator.clipboard.writeText(this.previousElementSibling.textContent).then(()=>{{this.textContent='Copied!'}})">Copy link</button></div></div></div>
             <div class='grid'><div><small>Unique attributed users (lifetime)</small><div class='stat'>{unique}</div></div><div><small>Current members / target</small><div class='stat'>{active} / {camp['target']}</div><div class='bar'><span style='width:{pct}%'></span></div></div><div><small>Leaves / kicks recorded</small><div class='stat'>{leaves}</div></div><div><small>Rejoin events</small><div class='stat'>{rejoins}</div></div><div><small>Tracking link hits</small><div class='stat'>{camp['clicks']}</div></div><div><small>Target remaining (current members)</small><div class='stat'>{max(0,camp['target']-active)}</div></div></div>
-            <p class='muted'>Created: {html.escape(camp['created_at'])} {(' · Completed: '+html.escape(camp['completed_at'])) if camp['completed_at'] else ''}</p><p><small>Telegram invite:</small> <code>{html.escape(camp['invite_link'])}</code></p><h3>Recent join/leave history</h3><div class='tablewrap'><table><thead><tr><th>Time (UTC)</th><th>Event</th><th>User ID</th><th>Username</th></tr></thead><tbody>{event_rows}</tbody></table></div></section>""")
+            <p class='muted'>Created: {html.escape(format_ist(camp['created_at']))} {(' · Completed: '+html.escape(format_ist(camp['completed_at']))) if camp['completed_at'] else ''}</p><p><small>Telegram invite:</small> <code>{html.escape(camp['invite_link'])}</code></p><h3>Recent join/leave history</h3><div class='tablewrap'><table><thead><tr><th>Time (IST)</th><th>Event</th><th>User ID</th><th>Username</th></tr></thead><tbody>{event_rows}</tbody></table></div><form method="post" action="/campaigns/{camp['id']}/delete" onsubmit="return confirm('Archive campaign: {html.escape(camp['name'], quote=True)}? Tracking will stop; records/history are preserved.');" style="margin-top:14px"><button class="secondary danger" type="submit">Delete / Archive Campaign</button></form></section>""")
         create_form = """<section class='card'><div class='section-intro'><div><p class='eyebrow'>Launch a campaign</p><h2>Create a tracking link</h2><p>Set a destination and target. Your private invite and tracking URL are generated automatically.</p></div><span class='pill'>New campaign</span></div><form method='post' action='/campaigns' class='form-grid'><div><label for='name'>Campaign name</label><input id='name' name='name' required maxlength='100' placeholder='October bio campaign'></div><div><label for='target'>Unique join target</label><input id='target' name='target' type='number' min='1' max='1000000' required value='100'></div><div class='full'><label for='destination'>Telegram group or channel</label><input id='destination' name='destination' required placeholder='@yourgroup or https://t.me/yourgroup'></div><div class='full'><p><button type='submit'>✦ Generate tracking link</button></p><div class='notice'>Important: clicks and existing members are not counted as new joins. Only confirmed join events attributed to this campaign's unique invite count toward membership. Link hits may include automated preview/scanner requests. Your Telegram account needs permission to create invite links.</div></div></form></section>"""
-        body = "<header><div class='hero-copy'><p class='eyebrow'>Telegram growth workspace</p><h1><span class='brand-mark'>CT</span>Campaign Tracker</h1><p>One dashboard for every bio link, verified join and campaign milestone.</p></div><div><form method='post' action='/logout'><button type='submit' class='secondary'>Sign out ↗</button></form><p class='target-note'>● Dashboard · use Refresh when you want updated statistics</p></div></header>" + create_form + ("".join(cards) if cards else "<section class='card empty-state'><div class='empty-icon'>✦</div><h2>Your first campaign starts here</h2><p>Create a campaign above to generate a unique tracking link and see verified joins in this dashboard.</p></section>")
+        with db() as c:
+            intro_template = c.execute("SELECT value FROM tracker_settings WHERE key='start_intro_template'").fetchone()["value"]
+            outro_template = c.execute("SELECT value FROM tracker_settings WHERE key='success_outro_template'").fetchone()["value"]
+        template_form = f"""<section class='card'><h2>Separate Intro &amp; Outro Templates</h2><p>These are additional messages sent to the campaign destination. Existing tracker behavior and target closure remain in place.</p><form method='post' action='/campaigns/templates'><label for='start_intro_template'>Campaign Start Intro Template</label><textarea id='start_intro_template' name='start_intro_template' rows='6' style='width:100%;background:#0a1224;color:var(--text);padding:12px;border:1px solid var(--line);border-radius:11px'>{html.escape(intro_template)}</textarea><label for='success_outro_template'>Mission Successful Outro Template</label><textarea id='success_outro_template' name='success_outro_template' rows='6' style='width:100%;background:#0a1224;color:var(--text);padding:12px;border:1px solid var(--line);border-radius:11px'>{html.escape(outro_template)}</textarea><p>Placeholders: {{campaign_name}}, {{target}}, {{current_joins}}, {{started_at}}, {{completed_at}}</p><button type='submit'>Save Caption Templates</button></form></section>"""
+        body = "<header><div class='hero-copy'><p class='eyebrow'>Telegram growth workspace</p><h1><span class='brand-mark'>CT</span>Campaign Tracker</h1><p>One dashboard for every bio link, verified join and campaign milestone.</p></div><div><form method='post' action='/logout'><button type='submit' class='secondary'>Sign out ↗</button></form><p class='target-note'>● Dashboard · timestamps shown in Indian Standard Time</p></div></header>" + create_form + template_form + ("".join(cards) if cards else "<section class='card empty-state'><div class='empty-icon'>✦</div><h2>Your first campaign starts here</h2><p>Create a campaign above to generate a unique tracking link and see verified joins in this dashboard.</p></section>")
         return HTMLResponse(_page("Campaign Tracker", body), headers={"Cache-Control":"no-store"})
+
+    @app.post("/campaigns/templates")
+    async def save_campaign_templates(request: Request, start_intro_template: str = Form(""), success_outro_template: str = Form("")):
+        if not _authed(request):
+            return RedirectResponse("/login", status_code=303)
+        with db() as c:
+            c.execute("INSERT INTO tracker_settings(key,value) VALUES('start_intro_template',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (start_intro_template[:10000],))
+            c.execute("INSERT INTO tracker_settings(key,value) VALUES('success_outro_template',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (success_outro_template[:10000],))
+        return RedirectResponse("/", status_code=303)
+
+    @app.post("/campaigns/{campaign_id}/delete")
+    async def delete_campaign(request: Request, campaign_id: int):
+        if not _authed(request):
+            return RedirectResponse("/login", status_code=303)
+        with db() as c:
+            c.execute("UPDATE campaigns SET status='archived' WHERE id=? AND status!='archived'", (campaign_id,))
+            exists = c.execute("SELECT 1 FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+        if not exists:
+            raise HTTPException(404, "Campaign not found")
+        # Preserve records and history; close its invite on a best-effort basis too.
+        asyncio.create_task(revoke_campaign(campaign_id))
+        return RedirectResponse("/", status_code=303)
 
     @app.post("/campaigns")
     async def create_campaign(request: Request, name: str = Form(...), destination: str = Form(...), target: int = Form(...)):
@@ -267,8 +303,10 @@ def install_tracker(app, client, admin_getter):
                 campaign_id = cur.lastrowid
         except Exception as exc:
             # Do not expose Telegram internals or credentials in a public error page.
-            log.exception("Campaign creation failed (%s)", type(exc).__name__)
+            log_msg = f"Campaign creation failed: {type(exc).__name__}: {exc}"
+            print(log_msg)
             return HTMLResponse(_page("Could not create campaign", "<section class='card'><h1>Could not create campaign</h1><p>Check the destination and ensure the userbot account can create invite links there.</p><a href='/'>Back to dashboard</a></section>"), status_code=400)
+        asyncio.create_task(send_campaign_caption(campaign_id, "start"))
         return RedirectResponse("/", status_code=303)
 
     @app.get("/r/{campaign_id}")
@@ -298,7 +336,7 @@ def install_tracker(app, client, admin_getter):
             entity = await client.get_entity(int(camp['destination_id']))
             await client(EditExportedChatInviteRequest(peer=entity, link=camp['invite_link'], revoked=True))
         except Exception as exc:
-            log.warning("Could not revoke campaign invite for campaign %s (%s)", campaign_id, type(exc).__name__)
+            print(f"Could not revoke campaign invite {campaign_id}: {type(exc).__name__}")
 
     def finish_if_target_reached(campaign_id):
         with db() as c:
@@ -311,168 +349,7 @@ def install_tracker(app, client, admin_getter):
                 return True
         return False
 
-    async def reconcile_campaign_importers():
-        """Poll Telegram's invite-importer API because ChatAction lacks invite URLs.
-
-        This records only users returned by Telegram for the exact campaign link.
-        Membership is checked separately; inability to check membership is not
-        treated as proof that a user left or is currently present.
-        """
-        if client is None:
-            return
-        while True:
-            try:
-                if not getattr(client, "is_connected", lambda: False)():
-                    await asyncio.sleep(15)
-                    continue
-                with db() as c:
-                    campaigns = c.execute(
-                        "SELECT * FROM campaigns WHERE status='active' ORDER BY id"
-                    ).fetchall()
-                for camp in campaigns:
-                    try:
-                        entity = await client.get_entity(int(camp["destination_id"]))
-                        offset_date = 0
-                        offset_user = telethon_types.InputUserEmpty()
-                        seen_pages = set()
-                        while True:
-                            result = await client(GetChatInviteImportersRequest(
-                                peer=entity,
-                                link=camp["invite_link"],
-                                offset_date=offset_date,
-                                offset_user=offset_user,
-                                limit=100,
-                            ))
-                            importers = list(getattr(result, "importers", []) or [])
-                            users = {int(u.id): u for u in (getattr(result, "users", []) or []) if getattr(u, "id", None) is not None}
-                            if not importers:
-                                break
-                            page_marker = (int(getattr(importers[0], "user_id", 0) or 0), int(getattr(importers[-1], "user_id", 0) or 0), len(importers))
-                            if page_marker in seen_pages:
-                                log.warning("Invite-importer pagination repeated for campaign %s", camp["id"])
-                                break
-                            seen_pages.add(page_marker)
-                            for importer in importers:
-                                uid = int(getattr(importer, "user_id", 0) or 0)
-                                user = users.get(uid)
-                                if not uid or not user or getattr(user, "bot", False):
-                                    continue
-                                join_date = getattr(importer, "date", None)
-                                if join_date is not None:
-                                    if join_date.tzinfo is None:
-                                        join_date = join_date.replace(tzinfo=timezone.utc)
-                                    joined_at = join_date.astimezone(timezone.utc).isoformat(timespec="seconds")
-                                else:
-                                    joined_at = utcnow()
-                                username = getattr(user, "username", None)
-                                first_name = getattr(user, "first_name", None)
-                                with db() as c:
-                                    previous = c.execute(
-                                        "SELECT * FROM members WHERE campaign_id=? AND user_id=?",
-                                        (camp["id"], uid),
-                                    ).fetchone()
-                                    already_active = bool(previous is not None and previous["is_member"])
-                                    if already_active:
-                                        # The live ChatAction handler maintains current membership. Avoid
-                                        # one Telegram permissions request per known member on every poll.
-                                        c.execute(
-                                            "UPDATE members SET username=?,first_name=? WHERE campaign_id=? AND user_id=?",
-                                            (username, first_name, camp["id"], uid),
-                                        )
-                                if already_active:
-                                    # Also close a campaign on startup if its persisted current-member
-                                    # count already meets the target but closure had not completed.
-                                    if finish_if_target_reached(int(camp["id"])):
-                                        await revoke_campaign(int(camp["id"]))
-                                    continue
-                                try:
-                                    await client.get_permissions(entity, user)
-                                    is_member = True
-                                except UserNotParticipantError:
-                                    is_member = False
-                                except Exception as membership_exc:
-                                    log.warning(
-                                        "Could not verify current membership for campaign %s (error=%s)",
-                                        camp["id"], type(membership_exc).__name__
-                                    )
-                                    # Keep existing state, and don't insert an unverifiable new record.
-                                    with db() as c:
-                                        existing = c.execute("SELECT 1 FROM members WHERE campaign_id=? AND user_id=?", (camp["id"], uid)).fetchone()
-                                    if not existing:
-                                        continue
-                                    is_member = None
-                                with db() as c:
-                                    previous = c.execute(
-                                        "SELECT * FROM members WHERE campaign_id=? AND user_id=?",
-                                        (camp["id"], uid),
-                                    ).fetchone()
-                                    if previous is None:
-                                        c.execute(
-                                            "INSERT INTO members(campaign_id,user_id,username,first_name,joined_at,last_join_at,left_at,is_member,join_count) VALUES(?,?,?,?,?,?,NULL,?,1)",
-                                            (camp["id"], uid, username, first_name, joined_at, joined_at, int(is_member)),
-                                        )
-                                        c.execute(
-                                            "INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)",
-                                            (camp["id"], uid, username, "joined", joined_at,
-                                             "Attributed by Telegram invite-importer API; current membership verified" if is_member else "Historical invite importer; not currently a member; past leave event unavailable"),
-                                        )
-                                    else:
-                                        # Keep the original first-join time and lifetime uniqueness.
-                                        if is_member is True and not previous["is_member"]:
-                                            c.execute(
-                                                "UPDATE members SET username=?,first_name=?,is_member=1,left_at=NULL,last_join_at=?,join_count=join_count+1 WHERE campaign_id=? AND user_id=?",
-                                                (username, first_name, joined_at, camp["id"], uid),
-                                            )
-                                            c.execute(
-                                                "INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)",
-                                                (camp["id"], uid, username, "rejoined", joined_at, "Membership restored by invite-importer reconciliation"),
-                                            )
-                                        elif is_member is False and previous["is_member"]:
-                                            c.execute(
-                                                "UPDATE members SET username=?,first_name=?,is_member=0 WHERE campaign_id=? AND user_id=?",
-                                                (username, first_name, camp["id"], uid),
-                                            )
-                                            # Do not fabricate a leave event or timestamp from an importer list.
-                                        else:
-                                            c.execute(
-                                                "UPDATE members SET username=?,first_name=? WHERE campaign_id=? AND user_id=?",
-                                                (username, first_name, camp["id"], uid),
-                                            )
-                                if is_member is True and finish_if_target_reached(int(camp["id"])):
-                                    await revoke_campaign(int(camp["id"]))
-                            if len(importers) < 100:
-                                break
-                            last = importers[-1]
-                            last_uid = int(getattr(last, "user_id", 0) or 0)
-                            last_user = users.get(last_uid)
-                            if not last_user:
-                                break
-                            offset_date_value = getattr(last, "date", None)
-                            if offset_date_value is None:
-                                break
-                            offset_date = int(offset_date_value.timestamp())
-                            offset_user = telethon_utils.get_input_user(await client.get_input_entity(last_user))
-                    except Exception as exc:
-                        log.warning("Invite-importer reconciliation failed for campaign %s (error=%s)", camp["id"], type(exc).__name__)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                log.exception("Campaign importer reconciliation loop failed (error=%s)", type(exc).__name__)
-            await asyncio.sleep(60)
-
-    def start_reconciler():
-        """Start one background importer-reconciliation task after client.start()."""
-        nonlocal reconciler_task
-        if client is None:
-            return None
-        if reconciler_task is None or reconciler_task.done():
-            reconciler_task = asyncio.create_task(reconcile_campaign_importers(), name="campaign-importer-reconciler")
-        return reconciler_task
-
-    reconciler_task = None
-
-    # Telegram membership actions remain useful for departures and known-user rejoins.
-    # New join attribution comes from getChatInviteImporters, not an unavailable URL field.
+    # Telegram membership actions are authoritative; a link click alone is never counted as a join.
     if client is not None:
         from telethon import events
 
@@ -481,7 +358,9 @@ def install_tracker(app, client, admin_getter):
             try:
                 chat = await event.get_chat()
                 chat_id = int(getattr(chat, 'id', 0) or 0)
-                invite_link = _join_invite_link(event)
+                action = getattr(getattr(event, 'action_message', None), 'action', None)
+                invite = getattr(action, 'invite', None)
+                invite_link = getattr(invite, 'link', None)
                 user = await event.get_user()
                 if not user or getattr(user, 'bot', False):
                     return
@@ -495,74 +374,35 @@ def install_tracker(app, client, admin_getter):
                     # Match the unique invite URL to one campaign. Existing members who merely click do not emit a join event.
                     matched = None
                     if invite_link:
-                        # Compare normalized URLs in Python so legacy stored variants still match.
-                        candidates = c.execute(
-                            "SELECT * FROM campaigns WHERE destination_id=? AND status='active'",
-                            (chat_id,)
-                        ).fetchall()
-                        matched = next(
-                            (row for row in candidates
-                             if normalize_invite_link(row["invite_link"]) == invite_link),
-                            None
-                        )
+                        matched = c.execute("SELECT * FROM campaigns WHERE destination_id=? AND invite_link=? AND status='active'", (chat_id, invite_link)).fetchone()
                     if event.user_joined or event.user_added:
                         if matched:
                             previous = c.execute("SELECT * FROM members WHERE campaign_id=? AND user_id=?", (matched['id'], uid)).fetchone()
-                            if previous and previous["is_member"]:
-                                # Telethon can deliver duplicate/overlapping service updates.
-                                # Keep metadata fresh without inflating join/rejoin events.
-                                c.execute(
-                                    "UPDATE members SET username=?,first_name=? WHERE campaign_id=? AND user_id=?",
-                                    (username, first_name, matched["id"], uid)
-                                )
+                            if previous:
+                                c.execute("UPDATE members SET username=?,first_name=?,last_join_at=?,left_at=NULL,is_member=1,join_count=join_count+1 WHERE campaign_id=? AND user_id=?", (username, first_name, timestamp, matched['id'], uid))
+                                etype = 'rejoined'
                             else:
-                                if previous:
-                                    c.execute(
-                                        "UPDATE members SET username=?,first_name=?,last_join_at=?,left_at=NULL,is_member=1,join_count=join_count+1 WHERE campaign_id=? AND user_id=?",
-                                        (username, first_name, timestamp, matched["id"], uid)
-                                    )
-                                    etype = "rejoined"
-                                else:
-                                    c.execute(
-                                        "INSERT INTO members(campaign_id,user_id,username,first_name,joined_at,last_join_at,is_member,join_count) VALUES(?,?,?,?,?,?,1,1)",
-                                        (matched["id"], uid, username, first_name, timestamp, timestamp)
-                                    )
-                                    etype = "joined"
-                                c.execute(
-                                    "INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)",
-                                    (matched["id"], uid, username, etype, timestamp, "Attributed to campaign invite")
-                                )
-                                check_target_ids.add(int(matched["id"]))
+                                c.execute("INSERT INTO members(campaign_id,user_id,username,first_name,joined_at,last_join_at,is_member,join_count) VALUES(?,?,?,?,?,?,1,1)", (matched['id'], uid, username, first_name, timestamp, timestamp))
+                                etype = 'joined'
+                            c.execute("INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)", (matched['id'], uid, username, etype, timestamp, 'Attributed to campaign invite'))
+                            # Check after this transaction: target means CURRENT active members.
+                            check_target_ids.add(int(matched['id']))
                         else:
                             # Rejoins/leaves of already-attributed members are logged, but unrelated joins never enter campaign totals.
                             known = c.execute("SELECT campaign_id FROM members WHERE user_id=? AND campaign_id IN (SELECT id FROM campaigns WHERE destination_id=?)", (uid, chat_id)).fetchall()
                             for row in known:
-                                member = c.execute(
-                                    "SELECT is_member FROM members WHERE campaign_id=? AND user_id=?",
-                                    (row["campaign_id"], uid)
-                                ).fetchone()
-                                if member and not member["is_member"]:
-                                    c.execute("UPDATE members SET is_member=1,left_at=NULL,last_join_at=?,join_count=join_count+1,username=?,first_name=? WHERE campaign_id=? AND user_id=?", (timestamp, username, first_name, row['campaign_id'], uid))
-                                    c.execute("INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)", (row['campaign_id'], uid, username, 'rejoined', timestamp, 'Rejoin observed; original campaign attribution retained'))
-                                    check_target_ids.add(int(row['campaign_id']))
+                                c.execute("UPDATE members SET is_member=1,left_at=NULL,last_join_at=?,join_count=join_count+1,username=?,first_name=? WHERE campaign_id=? AND user_id=?", (timestamp, username, first_name, row['campaign_id'], uid))
+                                c.execute("INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)", (row['campaign_id'], uid, username, 'rejoined', timestamp, 'Rejoin observed; original campaign attribution retained'))
+                                check_target_ids.add(int(row['campaign_id']))
                     elif event.user_left or event.user_kicked:
                         known = c.execute("SELECT campaign_id FROM members WHERE user_id=? AND campaign_id IN (SELECT id FROM campaigns WHERE destination_id=?)", (uid, chat_id)).fetchall()
                         for row in known:
-                            member = c.execute(
-                                "SELECT is_member FROM members WHERE campaign_id=? AND user_id=?",
-                                (row["campaign_id"], uid),
-                            ).fetchone()
-                            # Duplicate leave/kick updates must not create duplicate history rows.
-                            if not member or not member["is_member"]:
-                                continue
                             c.execute("UPDATE members SET is_member=0,left_at=? WHERE campaign_id=? AND user_id=?", (timestamp, row['campaign_id'], uid))
                             c.execute("INSERT INTO events(campaign_id,user_id,username,event_type,occurred_at,details) VALUES(?,?,?,?,?,?)", (row['campaign_id'], uid, username, 'left' if event.user_left else 'kicked', timestamp, None))
                 for cid in check_target_ids:
                     if finish_if_target_reached(cid):
                         revoke_ids.append(cid)
                 for cid in revoke_ids:
-                    asyncio.create_task(revoke_campaign(cid))
+                    asyncio.create_task(close_campaign_and_send_outro(cid))
             except Exception as exc:
-                log.exception("Telegram membership update failed (%s)", type(exc).__name__)
-
-    return start_reconciler
+                print(f"Tracker membership update error: {type(exc).__name__}: {exc}")
