@@ -43,7 +43,7 @@ GEMINI_API_KEY = required_env("GEMINI_API_KEY")
 SANDY_USER_ID = int(required_env("SANDY_USER_ID"))
 PRIMARY_ADMIN = int(os.getenv("PRIMARY_ADMIN", str(SANDY_USER_ID)))
 
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL_NAME = os.getenv("GEMINI_MODEL", "").strip()
 VOICE_REPLIES = os.getenv("VOICE_REPLIES", "false").lower() in {"1", "true", "yes", "on"}
 VOICE_NAME = os.getenv("VOICE_NAME", "hi-IN-SwaraNeural")
 MAX_HISTORY_TURNS = max(2, min(int(os.getenv("MAX_HISTORY_TURNS", "12")), 30))
