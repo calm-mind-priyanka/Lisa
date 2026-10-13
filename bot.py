@@ -194,11 +194,11 @@ async def handle_incoming(event):
 
             # Telegram messages are limited to 4096 characters.
             for offset in range(0, len(reply_text), 4000):
-                await event.reply(reply_text[offset:offset + 4000])
+                await client.send_message(event.chat_id, reply_text[offset:offset + 4000])
 
             voice_path = await make_voice_note(reply_text)
             if voice_path:
-                await client.send_file(event.chat_id, voice_path, voice_note=True, reply_to=event.id)
+                await client.send_file(event.chat_id, voice_path, voice_note=True)
     finally:
         if downloaded_path:
             try:
