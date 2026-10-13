@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import time
 from google import genai
 from google.genai import types
 
@@ -58,11 +59,13 @@ CONVERSATION AND PRIVACY
 # pricing. Keep this allowlist intentionally narrow: discovery alone does NOT
 # reveal whether a model is free, so arbitrary discovered models must never be used.
 # Re-check Google's pricing page periodically because model availability/pricing can change.
+# Prefer the lighter models for low-latency everyday chat. If one is unavailable
+# or overloaded, move immediately to the next approved model.
 FREE_MODEL_PRIORITY = (
-    "gemini-3.8-flash",
-    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.8-flash",
 )
 FREE_MODEL_SET = set(FREE_MODEL_PRIORITY)
 
@@ -96,7 +99,15 @@ def _is_candidate_model(model) -> bool:
 
 class AnanyaAI:
     def __init__(self, api_key: str, model_name: str = ""):
-        self.client = genai.Client(api_key=api_key)
+        # The SDK otherwise retries transient HTTP errors several times by default.
+        # For a chat userbot, short bounded requests + model fallback feel much faster.
+        self.client = genai.Client(
+            api_key=api_key,
+            http_options=types.HttpOptions(
+                timeout=12000,  # milliseconds per HTTP request
+                retry_options=types.HttpRetryOptions(attempts=1),
+            ),
+        )
         # An explicitly configured model is only a preference. If it is not
         # available to this API key, the code discovers compatible models and
         # automatically tries alternatives.
@@ -219,41 +230,47 @@ class AnanyaAI:
 
         last_error = None
         for name in ordered:
-            # Short retries for transient overload/rate-limit responses, then move
-            # to the next approved free-tier model. Never leave the allowlist.
-            for attempt, delay in enumerate((0, 1.5, 3.0)):
-                if delay:
-                    await asyncio.sleep(delay)
-                try:
-                    response = await asyncio.to_thread(
-                        self.client.models.generate_content,
-                        model=name,
-                        contents=contents,
-                        config=config,
+            # One request per model. The SDK-level retries are disabled above, so
+            # an overloaded model cannot hold up the conversation for minutes.
+            started = time.monotonic()
+            try:
+                response = await asyncio.to_thread(
+                    self.client.models.generate_content,
+                    model=name,
+                    contents=contents,
+                    config=config,
+                )
+                self.model_name = name
+                log.info(
+                    "Gemini response generated model=%s elapsed_seconds=%.2f",
+                    name,
+                    time.monotonic() - started,
+                )
+                return response
+            except Exception as exc:
+                last_error = exc
+                elapsed = time.monotonic() - started
+                if self._is_model_availability_error(exc):
+                    log.warning(
+                        "Approved Gemini model %s unavailable after %.2fs; trying next model",
+                        name, elapsed,
                     )
-                    self.model_name = name
-                    log.info("Gemini response generated with approved free-tier model=%s", name)
-                    return response
-                except Exception as exc:
-                    last_error = exc
-                    if self._is_model_availability_error(exc):
-                        log.warning("Approved Gemini model %s unavailable; trying next approved model", name)
-                        break
-                    if self._is_temporary_overload_error(exc):
-                        if attempt < 2:
-                            log.warning("Free-tier Gemini model %s overloaded (503); retry %s/2", name, attempt + 1)
-                            continue
-                        log.warning("Free-tier Gemini model %s remains overloaded; trying next approved model", name)
-                        break
-                    if self._is_quota_or_rate_limit_error(exc):
-                        if attempt < 2:
-                            log.warning("Free-tier Gemini model %s rate-limited/quota-limited; retry %s/2", name, attempt + 1)
-                            continue
-                        log.warning("Free-tier Gemini model %s remains quota/rate limited; trying next approved model", name)
-                        break
-                    # Invalid key, permission/billing errors, malformed requests, and
-                    # content errors are not fixed by changing models; stop clearly.
-                    raise
+                    continue
+                if self._is_temporary_overload_error(exc):
+                    log.warning(
+                        "Gemini model %s overloaded (503) after %.2fs; trying next model immediately",
+                        name, elapsed,
+                    )
+                    continue
+                if self._is_quota_or_rate_limit_error(exc):
+                    log.warning(
+                        "Gemini model %s rate/quota limited after %.2fs; trying next model",
+                        name, elapsed,
+                    )
+                    continue
+                # Invalid key, permission/billing errors, and malformed requests
+                # will not be fixed by switching models.
+                raise
         raise last_error or RuntimeError("No approved free-tier Gemini model succeeded")
 
     async def reply(
@@ -301,7 +318,7 @@ class AnanyaAI:
                     contents=contents,
                     config=types.GenerateContentConfig(
                         system_instruction=system_instruction,
-                        max_output_tokens=700,
+                        max_output_tokens=350,
                     ),
                 )
                 return (response.text or "").strip()
