@@ -1,12 +1,17 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY . .
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Lets Koyeb know we are exposing this port for FastAPI health check
-EXPOSE 8080
+COPY . .
 
-CMD ["python3", "bot.py"]
+EXPOSE 8080
+CMD ["python", "bot.py"]
