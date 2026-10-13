@@ -1,4 +1,6 @@
-telethon
-fastapi
-uvicorn
-python-multipart
+telethon>=1.36.0
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+google-genai>=1.0.0
+python-dotenv>=1.0.0
+edge-tts>=6.1.0

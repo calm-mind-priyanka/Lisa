@@ -1,569 +1,282 @@
-from telethon import TelegramClient, events
-from telethon.sessions import StringSession
-from telethon.errors import ChatWriteForbiddenError, FloodWaitError
-from telethon.tl import types as tltypes
-from telethon.tl.types import (
-    MessageEntityUrl, MessageEntityTextUrl, MessageEntityMention,
-    UserStatusOnline, UserStatusOffline
-)
-import os, asyncio, json, time, random, sys, logging
+import asyncio
+import logging
+import os
+import sys
+import time
+import threading
+import tempfile
+import shutil
+from pathlib import Path
+from datetime import timedelta
+
+from dotenv import load_dotenv
 from fastapi import FastAPI
 import uvicorn
-from datetime import datetime, timedelta, timezone
+from telethon import TelegramClient, events
+from telethon.sessions import StringSession
+from telethon.errors import FloodWaitError, ChatWriteForbiddenError
 
-# =========================
-# Logging Configuration
-# =========================
+from ai_engine import AnanyaAI
+from memory import ConversationMemory
+
+load_dotenv()
+
 logging.basicConfig(
-    level=logging.INFO,
-    handlers=[
-        logging.FileHandler("error.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
-    ],
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    handlers=[logging.StreamHandler(sys.stdout)],
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
 )
-log = logging.getLogger("bot")
+log = logging.getLogger("ananya-bot")
 
-# =========================
-# Keep-alive API (Koyeb / Render)
-# =========================
-app = FastAPI()
 
-# =========================
-# Load Credentials & Config
-# =========================
-CONFIG_FILE = "bot_transfer.json"
+def required_env(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
 
-# Secrets must be supplied through Koyeb environment variables. A legacy
-# bot_transfer.json is still supported for existing deployments, but secrets
-# are never embedded in source code.
-try:
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-        _config = json.load(f)
-except (OSError, json.JSONDecodeError):
-    _config = {}
-API_ID = int(os.getenv("API_ID", _config.get("API_ID") or 0))
-API_HASH = os.getenv("API_HASH", _config.get("API_HASH") or "")
-SESSION = os.getenv("SESSION", _config.get("SESSION") or "")
-PRIMARY_ADMIN = int(os.getenv("PRIMARY_ADMIN", _config.get("PRIMARY_ADMIN") or 0))
-SECONDARY_ADMIN = int(os.getenv("SECONDARY_ADMIN", PRIMARY_ADMIN or 0))
 
-# =========================
-# Files & State Management
-# =========================
-GROUPS_FILE = "groups.json"
-SETTINGS_FILE = "settings.json"
+API_ID = int(required_env("API_ID"))
+API_HASH = required_env("API_HASH")
+SESSION = required_env("SESSION")
+GEMINI_API_KEY = required_env("GEMINI_API_KEY")
+SANDY_USER_ID = int(required_env("SANDY_USER_ID"))
+PRIMARY_ADMIN = int(os.getenv("PRIMARY_ADMIN", str(SANDY_USER_ID)))
 
-def load_data():
-    groups = set()
-    if os.path.exists(GROUPS_FILE):
-        try:
-            with open(GROUPS_FILE, "r", encoding="utf-8") as f:
-                raw_groups = json.load(f)
-            # Normalize persisted IDs: JSON string IDs and integer IDs must compare
-            # equally with Telethon's integer event.chat_id.
-            groups = set()
-            invalid_group_ids = []
-            for raw_gid in raw_groups:
-                try:
-                    groups.add(int(raw_gid))
-                except (TypeError, ValueError):
-                    invalid_group_ids.append(str(raw_gid))
-            log.info(
-                "GROUPS_LOADED file=%s count=%d ids=%s invalid_count=%d",
-                GROUPS_FILE, len(groups), sorted(groups), len(invalid_group_ids)
-            )
-            if invalid_group_ids:
-                log.warning("GROUPS_INVALID_IDS values=%s", invalid_group_ids[:20])
-        except Exception as e:
-            log.exception("GROUPS_LOAD_FAILED file=%s error=%s", GROUPS_FILE, e)
-    else:
-        log.warning("GROUPS_FILE_MISSING file=%s; group auto-replies need /addgroup", GROUPS_FILE)
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+VOICE_REPLIES = os.getenv("VOICE_REPLIES", "false").lower() in {"1", "true", "yes", "on"}
+VOICE_NAME = os.getenv("VOICE_NAME", "hi-IN-SwaraNeural")
+MAX_HISTORY_TURNS = max(2, min(int(os.getenv("MAX_HISTORY_TURNS", "12")), 30))
+MAX_MEDIA_MB = max(1, min(int(os.getenv("MAX_MEDIA_MB", "15")), 20))
+PORT = int(os.getenv("PORT", "8080"))
 
-    defaults = {
-        "reply_msg": "🤖 Bot is active!",
-        "delete_delay": 15,
-        "reply_gap": 30,
-        "pm_msg": None,
-        "admin_autodel": 20,
-        "rate_send_interval": 1.6,
-        "rate_edit_interval": 1.2,
-        "rate_delete_interval": 1.4,
-    }
-    
-    if os.path.exists(SETTINGS_FILE):
-        try:
-            with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                defaults.update(data)
-        except Exception as e:
-            log.error(f"Error loading settings: {e}")
+def parse_ids(name: str) -> set[int]:
+    values = os.getenv(name, "")
+    result = set()
+    for value in values.split(","):
+        value = value.strip()
+        if value and value.lstrip("-").isdigit():
+            result.add(int(value))
+    return result
 
-    return (
-        groups,
-        defaults["reply_msg"],
-        defaults["delete_delay"],
-        defaults["reply_gap"],
-        defaults["pm_msg"],
-        defaults["admin_autodel"],
-        defaults["rate_send_interval"],
-        defaults["rate_edit_interval"],
-        defaults["rate_delete_interval"]
-    )
+AI_GROUP_IDS = parse_ids("AI_GROUP_IDS")
+IGNORED_USER_IDS = parse_ids("IGNORED_USER_IDS")
+IGNORED_USER_IDS.discard(SANDY_USER_ID)
 
-def save_groups():
-    try:
-        with open(GROUPS_FILE, "w", encoding="utf-8") as f:
-            json.dump(list(groups), f, indent=2)
-    except Exception as e:
-        log.error(f"Error saving groups: {e}")
-
-def save_settings():
-    try:
-        data = {
-            "reply_msg": msg,
-            "delete_delay": delay,
-            "reply_gap": gap,
-            "pm_msg": pm_msg,
-            "admin_autodel": admin_autodel,
-            "rate_send_interval": rate_send_interval,
-            "rate_edit_interval": rate_edit_interval,
-            "rate_delete_interval": rate_delete_interval,
-        }
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-    except Exception as e:
-        log.error(f"Error saving settings: {e}")
-
-(
-    groups, msg, delay, gap, pm_msg, 
-    admin_autodel, rate_send_interval, 
-    rate_edit_interval, rate_delete_interval
-) = load_data()
-
-# Runtime trackers
-last_reply = {}
-last_sent_messages = {}
 bot_active = True
-emergency_stop = False
-flood_pause_until = 0
-WATCHED_ADMIN_ID = None
-WATCH_GRACE_SEC = 5
-start_time_global = time.time()
+start_time = time.time()
+memory = ConversationMemory(max_turns=MAX_HISTORY_TURNS)
+ai = AnanyaAI(api_key=GEMINI_API_KEY, model_name=MODEL_NAME)
+client = TelegramClient(StringSession(SESSION), API_ID, API_HASH)
 
-# Time helpers
-IST = timezone(timedelta(hours=5, minutes=30))
-def now_utc(): return datetime.now(timezone.utc)
-def fmt_ist(dt_utc: datetime): return dt_utc.astimezone(IST).strftime("%Y-%m-%d %I:%M:%S %p IST")
+app = FastAPI(title="Ananya AI Userbot", docs_url=None, redoc_url=None)
 
-# =========================
-# Advanced Rate Limiter
-# =========================
-class RateLimiter:
-    def __init__(self, min_interval: float, jitter: float = 0.4):
-        self.min_interval = float(min_interval)
-        self.jitter = float(jitter)
-        self._lock = asyncio.Lock()
-        self._next_allowed = 0.0
+@app.get("/")
+async def root():
+    return {"status": "Ananya AI userbot is alive and running"}
 
-    async def wait(self):
-        async with self._lock:
-            now = time.time()
-            if now < self._next_allowed:
-                await asyncio.sleep(self._next_allowed - now)
-            self._next_allowed = time.time() + self.min_interval + random.uniform(0, self.jitter)
+@app.get("/health")
+async def health():
+    return {"status": "ok", "service": "ananya-ai-userbot"}
 
-send_rl = RateLimiter(rate_send_interval, jitter=0.5)
-edit_rl = RateLimiter(rate_edit_interval, jitter=0.4)
-delete_rl = RateLimiter(rate_delete_interval, jitter=0.6)
 
-# =========================
-# Telegram Client Initialization
-# =========================
-if not (API_ID and API_HASH and SESSION and PRIMARY_ADMIN):
-    log.warning("Telegram credentials are missing. Set API_ID, API_HASH, SESSION, and PRIMARY_ADMIN in Koyeb environment variables.")
+def run_web():
+    uvicorn.run(app, host="0.0.0.0", port=PORT, log_level="warning")
 
-client = TelegramClient(StringSession(SESSION), API_ID or 1, API_HASH or "missing-api-hash")
-# Filled after Telegram connects; TelegramClient itself has no `.uid` attribute.
-MY_USER_ID = None
 
-# Campaign tracker routes and join/leave event handler share this same FastAPI
-# app and Telethon client; no second web service is created.
-from tracker import install_tracker
-start_tracker_reconciler = install_tracker(app, client, lambda: PRIMARY_ADMIN)
-
-admin_dm_pending = {}
-
-async def _schedule_delete_after_read(msg, seconds: int):
-    admin_dm_pending[msg.id] = (msg, time.time() + 120)
-
-@client.on(events.Raw)
-async def on_raw_update(update):
+async def make_voice_note(text: str) -> str | None:
+    if not VOICE_REPLIES:
+        return None
+    temp_dir = tempfile.mkdtemp(prefix="ananya_voice_")
+    mp3_path = os.path.join(temp_dir, "reply.mp3")
+    ogg_path = os.path.join(temp_dir, "reply.ogg")
     try:
-        if isinstance(update, (tltypes.UpdateReadHistoryOutbox, tltypes.UpdateReadHistoryInbox)):
-            peer = update.peer
-            target_uid = None
-            if isinstance(peer, tltypes.PeerUser):
-                target_uid = peer.user_id
-            
-            if target_uid in (PRIMARY_ADMIN, SECONDARY_ADMIN) or hasattr(update, 'max_id'):
-                max_id = getattr(update, 'max_id', 0)
-                if max_id > 0:
-                    to_delete = [mid for mid in list(admin_dm_pending.keys()) if mid <= max_id]
-                    for mid in to_delete:
-                        msg_obj, expire_at = admin_dm_pending.pop(mid, (None, 0))
-                        if msg_obj:
-                            asyncio.create_task(safe_delete(msg_obj, 1.0))
-    except Exception as e:
-        log.debug(f"on_raw_update error: {e}")
-
-async def dm_cleanup_watcher():
-    while True:
-        await asyncio.sleep(10)
-        now = time.time()
-        for mid, (msg_obj, expire_at) in list(admin_dm_pending.items()):
-            if now >= expire_at:
-                admin_dm_pending.pop(mid, None)
-                if msg_obj:
-                    asyncio.create_task(safe_delete(msg_obj, 0.5))
-
-async def safe_delete(message, after_sec: float):
-    await asyncio.sleep(after_sec + random.uniform(0.5, 2.0))
-    try:
-        await delete_rl.wait()
-        await message.delete()
-    except Exception as e:
-        log.warning(f"Delete failed: {e}")
-
-async def notify_admin(text: str, autodel_on_read=True, autodel_sec=None):
-    try:
-        await send_rl.wait()
-        m = await client.send_message(PRIMARY_ADMIN, text)
-        if autodel_on_read:
-            sec = autodel_sec if autodel_sec is not None else admin_autodel
-            asyncio.create_task(_schedule_delete_after_read(m, sec))
-        return m
-    except Exception as e:
-        log.error(f"Failed to notify admin: {e}")
-
-# =========================
-# Emergency watch
-# =========================
-@client.on(events.UserUpdate)
-async def watch_admin(event):
-    global emergency_stop
-    if WATCHED_ADMIN_ID and event.user_id == WATCHED_ADMIN_ID:
-        if isinstance(event.status, UserStatusOnline):
-            await asyncio.sleep(WATCH_GRACE_SEC)
-            emergency_stop = True
-            await notify_admin(f"🚨 Emergency stop activated (watched admin online at {fmt_ist(now_utc())}).")
-            for chat_id, msg_obj in list(last_sent_messages.items()):
-                try: 
-                    await delete_rl.wait()
-                    await msg_obj.delete()
-                except: 
-                    pass
-            last_sent_messages.clear()
-        elif isinstance(event.status, UserStatusOffline):
-            emergency_stop = False
-            await notify_admin(f"✅ Emergency stop lifted (watched admin offline at {fmt_ist(now_utc())}).")
-
-# =========================
-# Admin Commands Handler
-# =========================
-@client.on(events.NewMessage(outgoing=True, from_users=PRIMARY_ADMIN))
-async def primary_admin_handler(e):
-    global msg, delay, gap, pm_msg, admin_autodel, bot_active
-
-    txt = (e.raw_text or "").strip()
-
-    if txt.startswith("/ping"):
-        t1 = time.time()
-        m = await e.reply("Pinging...")
-        latency = round((time.time() - t1) * 1000)
-        await m.edit(f"Pong! 🏓 `{latency}ms`")
-        return
-
-    if txt.startswith("/status"):
-        uptime_sec = int(time.time() - start_time_global)
-        uptime_str = str(timedelta(seconds=uptime_sec))
-        status_text = (
-            f"🤖 **Bot Status Report**\n"
-            f"• State: `{'Active ✅' if bot_active else 'Stopped ⛔'}`\n"
-            f"• Uptime: `{uptime_str}`\n"
-            f"• Monitored Groups: `{len(groups)}`\n"
-            f"• Emergency Stop: `{emergency_stop}`\n"
-            f"• Delay / Gap: `{delay}s / {gap}s`"
+        import edge_tts
+        communicate = edge_tts.Communicate(text[:2500], VOICE_NAME)
+        await communicate.save(mp3_path)
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", mp3_path, "-c:a", "libopus", "-b:a", "32k",
+            "-vbr", "on", "-application", "voip", ogg_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
         )
-        await e.reply(status_text)
+        await proc.communicate()
+        if proc.returncode != 0 or not os.path.exists(ogg_path):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return None
+        return ogg_path
+    except Exception:
+        log.exception("Voice generation failed; text response will still be sent")
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return None
+
+
+async def handle_incoming(event):
+    global bot_active
+    if event.out or not bot_active:
         return
 
-    if txt.startswith("/listgroups"):
-        if not groups:
-            await e.reply("📂 No groups added to the tracking list yet.")
+    sender = await event.get_sender()
+    if not sender or getattr(sender, "bot", False):
+        return
+    sender_id = int(sender.id)
+    if sender_id in IGNORED_USER_IDS:
+        return
+
+    # Private chats work by default. Group chats are only enabled for IDs listed in
+    # AI_GROUP_IDS and the bot only replies when mentioned or directly replied to.
+    if event.is_private:
+        pass
+    else:
+        if event.chat_id not in AI_GROUP_IDS:
             return
-        
-        group_list_text = "📋 **Monitored Groups List:**\n\n"
-        for gid in groups:
+        me = await client.get_me()
+        text_for_trigger = event.raw_text or ""
+        is_reply_to_me = False
+        if event.message and event.message.reply_to:
             try:
-                chat = await client.get_entity(gid)
-                title = getattr(chat, "title", "Unknown Title")
-                group_list_text += f"• **{title}**\n  `{gid}`\n\n"
+                replied = await event.get_reply_message()
+                is_reply_to_me = bool(replied and replied.sender_id == me.id)
             except Exception:
-                group_list_text += f"• **[Could not fetch name]**\n  `{gid}`\n\n"
-        
-        if len(group_list_text) > 4000:
-            for chunk in [group_list_text[i:i+4000] for i in range(0, len(group_list_text), 4000)]:
-                await e.reply(chunk)
-        else:
-            await e.reply(group_list_text)
+                is_reply_to_me = False
+        mentioned = bool(me.username and ("@" + me.username.lower()) in text_for_trigger.lower())
+        if not mentioned and not is_reply_to_me:
+            return
+
+    text = (event.raw_text or "").strip()
+    media = None
+    mime_type = None
+    is_voice_or_audio = bool(event.message and (event.message.voice or event.message.audio))
+    is_photo = bool(event.message and event.message.photo)
+    if not text and not (is_voice_or_audio or is_photo):
         return
 
-    if txt.startswith("/update"):
-        m = await e.reply("🔄 Pulling latest code updates from GitHub...")
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "git", "pull",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            stdout, stderr = await proc.communicate()
-            
-            if proc.returncode == 0:
-                output = stdout.decode().strip()
-                await m.edit(f"✅ **Update Successful!**\n```{output}```\n\n🔄 Restarting bot application...")
-                await client.disconnect()
-                os.execv(sys.executable, [sys.executable] + sys.argv)
-            else:
-                err = stderr.decode().strip()
-                await m.edit(f"❌ **Git Pull Failed:**\n```{err}```")
-        except Exception as ex:
-            await m.edit(f"❌ **Error executing update:** `{ex}`")
-        return
-
-    if txt.startswith("/setmsg "):
-        msg = txt[len("/setmsg "):].strip()
-        save_settings()
-        await e.reply("✅ Reply message updated successfully.")
-        return
-
-    if txt.startswith("/setdel "):
-        try:
-            delay = int(txt[len("/setdel "):].strip())
-            save_settings()
-            await e.reply(f"✅ Delete delay set to `{delay}` seconds.")
-        except ValueError:
-            await e.reply("❌ Invalid number provided for delete delay.")
-        return
-
-    if txt.startswith("/setgap "):
-        try:
-            gap = int(txt[len("/setgap "):].strip())
-            save_settings()
-            await e.reply(f"✅ Reply gap set to `{gap}` seconds.")
-        except ValueError:
-            await e.reply("❌ Invalid number provided for reply gap.")
-        return
-
-    if txt.startswith("/setpm "):
-        pm_msg = txt[len("/setpm "):].strip()
-        save_settings()
-        await e.reply("✅ Private message auto-reply updated.")
-        return
-
-    if txt.startswith("/addgroup "):
-        try:
-            gid = int(txt[len("/addgroup "):].strip())
-            groups.add(gid)
-            save_groups()
-            await e.reply(f"✅ Group `{gid}` added to watchlist.")
-        except ValueError:
-            await e.reply("❌ Invalid Group ID format.")
-        return
-
-    if txt.startswith("/delgroup "):
-        try:
-            gid = int(txt[len("/delgroup "):].strip())
-            groups.discard(gid)
-            save_groups()
-            await e.reply(f"✅ Group `{gid}` removed from watchlist.")
-        except ValueError:
-            await e.reply("❌ Invalid Group ID format.")
-        return
-
-    if txt.startswith("/stopbot"):
-        if bot_active:
-            bot_active = False
-            await e.reply("⛔ Bot auto-replies paused.")
-        else:
-            await e.reply("⚠️ Bot is already stopped.")
-        return
-
-    if txt.startswith("/resumebot"):
-        if not bot_active:
-            bot_active = True
-            await e.reply("✅ Bot auto-replies resumed.")
-        else:
-            await e.reply("⚠️ Bot is already active.")
-        return
-
-# =========================
-# Secondary Admin (/transfer)
-# =========================
-@client.on(events.NewMessage(from_users=SECONDARY_ADMIN, incoming=True))
-async def secondary_transfer(e):
-    global API_ID, API_HASH, SESSION, PRIMARY_ADMIN
-    txt = (e.raw_text or "").strip()
-    if txt.startswith("/transfer "):
-        try:
-            parts = txt.split(" ", 4)
-            new_api_id = int(parts[1])
-            new_api_hash = parts[2]
-            new_session = parts[3]
-            new_admin = int(parts[4])
-            API_ID, API_HASH, SESSION, PRIMARY_ADMIN = new_api_id, new_api_hash, new_session, new_admin
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump({
-                    "API_ID": API_ID,
-                    "API_HASH": API_HASH,
-                    "SESSION": SESSION,
-                    "PRIMARY_ADMIN": PRIMARY_ADMIN
-                }, f, indent=2)
-            await e.reply("✅ Bot credentials updated! Restarting bot...")
-            await client.disconnect()
-            os.execv(sys.executable, [sys.executable] + sys.argv)
-        except Exception as ex:
-            await e.reply(f"❌ Error during transfer: {ex}")
-
-# =========================
-# Incoming Message Handler (Guaranteed Exact User Reply)
-# =========================
-@client.on(events.NewMessage(incoming=True))
-async def message_handler(event):
-    global emergency_stop, flood_pause_until, bot_active
-    chat_id = event.chat_id
-    sender_id = event.sender_id
-    # Do not log message text; IDs and decision reasons are enough to diagnose.
+    downloaded_path = None
+    voice_path = None
     try:
-        log.info(
-            "INCOMING_MESSAGE chat_id=%s sender_id=%s private=%s text_len=%s",
-            chat_id, sender_id, event.is_private, len(event.raw_text or "")
-        )
-        now_ts = time.time()
-        if now_ts < flood_pause_until:
-            log.info("AUTO_REPLY_SKIPPED reason=flood_pause chat_id=%s seconds_left=%d",
-                     chat_id, int(flood_pause_until - now_ts))
-            return
-        if emergency_stop:
-            log.info("AUTO_REPLY_SKIPPED reason=emergency_stop chat_id=%s", chat_id)
-            return
-        if not bot_active:
-            log.info("AUTO_REPLY_SKIPPED reason=bot_inactive chat_id=%s", chat_id)
-            return
+        async with client.action(event.chat_id, "typing"):
+            if is_voice_or_audio or is_photo:
+                downloaded_path = await event.download_media()
+                if downloaded_path:
+                    size = os.path.getsize(downloaded_path)
+                    if size > MAX_MEDIA_MB * 1024 * 1024:
+                        await event.reply(f"That file is too large for me to process. Please send something under {MAX_MEDIA_MB} MB. 🙂")
+                        return
+                    suffix = Path(downloaded_path).suffix.lower()
+                    if is_photo:
+                        mime_type = {
+                            ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                            ".png": "image/png", ".webp": "image/webp",
+                        }.get(suffix, "image/jpeg")
+                        text = text or "Look at this image and respond naturally about what you can actually see."
+                    else:
+                        mime_type = {
+                            ".ogg": "audio/ogg", ".oga": "audio/ogg",
+                            ".mp3": "audio/mpeg", ".m4a": "audio/mp4",
+                            ".wav": "audio/wav", ".webm": "audio/webm",
+                        }.get(suffix, "audio/ogg" if event.message.voice else "audio/mpeg")
+                        text = text or "Listen to this audio/voice message and respond naturally. If you cannot understand it, ask the sender to repeat it."
+                    media = Path(downloaded_path).read_bytes()
 
-        if event.is_private:
-            if pm_msg:
-                log.info("PM_AUTO_REPLY_ATTEMPT chat_id=%s sender_id=%s", chat_id, sender_id)
-                await asyncio.sleep(random.uniform(0.5, 1.2))
-                await send_rl.wait()
-                m = await event.reply(pm_msg)
-                log.info("PM_AUTO_REPLY_SUCCESS chat_id=%s reply_message_id=%s", chat_id, m.id)
-                if delay > 0:
-                    asyncio.create_task(safe_delete(m, min(delay, 120)))
-            else:
-                log.info("PM_AUTO_REPLY_SKIPPED reason=no_pm_message chat_id=%s", chat_id)
-            return
+            reply_text = await ai.reply(
+                user_id=sender_id,
+                user_text=text,
+                history=memory.get(sender_id),
+                is_sandy=(sender_id == SANDY_USER_ID),
+                attachment=media,
+                mime_type=mime_type,
+            )
+            reply_text = (reply_text or "").strip()
+            if not reply_text:
+                reply_text = "Sorry yaar, my thoughts got a little tangled 😅 Can you say that again?"
 
-        if chat_id not in groups:
-            log.info("AUTO_REPLY_SKIPPED reason=group_not_watched chat_id=%s watched=%s",
-                     chat_id, chat_id in groups)
-            return
+            memory.add(sender_id, text or "[media message]", reply_text)
 
-        # Block messages sent by admin IDs or the userbot itself.
-        if sender_id in (PRIMARY_ADMIN, SECONDARY_ADMIN, MY_USER_ID):
-            log.info("AUTO_REPLY_SKIPPED reason=excluded_sender chat_id=%s sender_id=%s", chat_id, sender_id)
-            return
+            # Telegram messages are limited to 4096 characters.
+            for offset in range(0, len(reply_text), 4000):
+                await event.reply(reply_text[offset:offset + 4000])
 
-        sender = event.sender
-        if sender and getattr(sender, "bot", False):
-            log.info("AUTO_REPLY_SKIPPED reason=sender_is_bot chat_id=%s sender_id=%s", chat_id, sender_id)
-            return
+            voice_path = await make_voice_note(reply_text)
+            if voice_path:
+                await client.send_file(event.chat_id, voice_path, voice_note=True, reply_to=event.id)
+    finally:
+        if downloaded_path:
+            try:
+                os.remove(downloaded_path)
+            except OSError:
+                pass
+        if voice_path:
+            try:
+                shutil.rmtree(os.path.dirname(voice_path), ignore_errors=True)
+            except Exception:
+                pass
 
-        if event.is_channel and event.out:
-            log.info("AUTO_REPLY_SKIPPED reason=outgoing_channel_message chat_id=%s", chat_id)
-            return
 
-        if event.message.entities:
-            for ent in event.message.entities:
-                if isinstance(ent, (MessageEntityUrl, MessageEntityTextUrl, MessageEntityMention)):
-                    log.info("AUTO_REPLY_SKIPPED reason=url_or_mention_entity chat_id=%s entity=%s",
-                             chat_id, type(ent).__name__)
-                    return
-
-        elapsed = now_ts - last_reply.get(chat_id, 0)
-        if elapsed < gap:
-            log.info("AUTO_REPLY_SKIPPED reason=reply_gap chat_id=%s seconds_left=%d",
-                     chat_id, int(gap - elapsed))
-            return
-
-        log.info("AUTO_REPLY_ATTEMPT chat_id=%s sender_id=%s", chat_id, sender_id)
-        await asyncio.sleep(random.uniform(0.8, 1.8))
-        last_reply[chat_id] = time.time()
-        await send_rl.wait()
-        m = await event.reply(msg)
-        last_sent_messages[chat_id] = m
-        log.info("AUTO_REPLY_SUCCESS chat_id=%s reply_message_id=%s", chat_id, m.id)
-        if delay > 0:
-            asyncio.create_task(safe_delete(m, delay))
-
-    except FloodWaitError as fwe:
-        wait_sec = int(getattr(fwe, "seconds", 30))
-        flood_pause_until = time.time() + wait_sec
-        resume_time = fmt_ist(datetime.fromtimestamp(time.time() + wait_sec, tz=timezone.utc))
-        log.warning("AUTO_REPLY_FLOOD_WAIT chat_id=%s seconds=%s", chat_id, wait_sec)
-        await notify_admin(f"⚠️ Flood wait triggered! Pausing for {wait_sec}s until {resume_time}.")
-        await asyncio.sleep(wait_sec)
-        flood_pause_until = 0
-        await notify_admin("✅ Flood wait over. Bot resumed.")
-
+@client.on(events.NewMessage(incoming=True))
+async def incoming_message_handler(event):
+    try:
+        await handle_incoming(event)
+    except FloodWaitError as exc:
+        wait_seconds = min(int(getattr(exc, "seconds", 30)), 120)
+        log.warning("Telegram FloodWait: sleeping for %s seconds", wait_seconds)
+        await asyncio.sleep(wait_seconds)
     except ChatWriteForbiddenError:
-        log.exception("AUTO_REPLY_FAILED reason=chat_write_forbidden chat_id=%s sender_id=%s", chat_id, sender_id)
-    except Exception as e:
-        log.exception("AUTO_REPLY_FAILED chat_id=%s sender_id=%s error=%s", chat_id, sender_id, e)
+        log.warning("Cannot write to chat %s", event.chat_id)
+    except Exception:
+        log.exception("Incoming message handler failed")
+        if event.is_private:
+            try:
+                await event.reply("Oops, something went wrong on my side. Please try again in a little while. 💛")
+            except Exception:
+                pass
 
-# =========================
-# Main Execution
-# =========================
+
+@client.on(events.NewMessage(outgoing=True, from_users=PRIMARY_ADMIN))
+async def admin_commands(event):
+    global bot_active
+    text = (event.raw_text or "").strip()
+    command = text.split(maxsplit=1)[0].lower() if text else ""
+
+    if command == "/ping":
+        started = time.time()
+        message = await event.reply("Pinging…")
+        await message.edit(f"Pong! 🏓 `{round((time.time() - started) * 1000)} ms`")
+    elif command == "/status":
+        uptime = str(timedelta(seconds=int(time.time() - start_time)))
+        me = await client.get_me()
+        await event.reply(
+            "🤖 **Ananya AI Status**\n"
+            f"• State: `{'Active ✅' if bot_active else 'Paused ⛔'}`\n"
+            f"• Uptime: `{uptime}`\n"
+            f"• Telegram account ID: `{me.id}`\n"
+            f"• AI-enabled groups: `{len(AI_GROUP_IDS)}`\n"
+            f"• Memory: `temporary / in-memory`\n"
+            f"• Voice replies: `{'on' if VOICE_REPLIES else 'off'}`"
+        )
+    elif command == "/stopbot":
+        bot_active = False
+        await event.reply("⛔ Ananya's automatic replies are paused. Use `/resumebot` to resume.")
+    elif command == "/resumebot":
+        bot_active = True
+        await event.reply("✅ Ananya's automatic replies are active again.")
+    elif command == "/clearallmemory":
+        memory.clear_all()
+        await event.reply("🧹 Temporary conversation memory has been cleared.")
+
+
 async def main():
-    global MY_USER_ID
-    if not (API_ID and API_HASH and SESSION and PRIMARY_ADMIN):
-        raise RuntimeError("Missing Telegram credentials. Configure API_ID, API_HASH, SESSION, and PRIMARY_ADMIN in Koyeb environment variables.")
+    threading.Thread(target=run_web, daemon=True, name="health-server").start()
     await client.start()
     me = await client.get_me()
-    MY_USER_ID = me.id
-    log.info(
-        "TELEGRAM_CONNECTED user_id=%s watched_group_count=%d watched_group_ids=%s bot_active=%s emergency_stop=%s",
-        MY_USER_ID, len(groups), sorted(groups), bot_active, emergency_stop
-    )
-    start_tracker_reconciler()
-    asyncio.create_task(dm_cleanup_watcher())
-    log.info("Telegram userbot started successfully.")
-    port = int(os.getenv("PORT", "8080"))
-    config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="warning", access_log=False)
-    server = uvicorn.Server(config)
-    # Keep the HTTP app and Telethon on one asyncio loop. Running Uvicorn in a
-    # separate thread breaks async Telegram calls made by dashboard requests.
-    server_task = asyncio.create_task(server.serve())
-    client_task = asyncio.create_task(client.run_until_disconnected())
-    log.info("Campaign dashboard listening on port %s", port)
-    done, _ = await asyncio.wait({server_task, client_task}, return_when=asyncio.FIRST_COMPLETED)
-    if client_task in done:
-        server.should_exit = True
-        await server_task
-        client_task.result()
-    if server_task in done:
-        await client.disconnect()
-        server_task.result()
+    log.info("TELEGRAM_CONNECTED user_id=%s username=%s", me.id, me.username)
+    log.info("Ananya AI userbot started; AI_GROUP_IDS=%s", sorted(AI_GROUP_IDS))
+    if not AI_GROUP_IDS:
+        log.info("Group replies are disabled. Set AI_GROUP_IDS to enable selected groups.")
+    try:
+        await client.run_until_disconnected()
+    finally:
+        await ai.close()
+
 
 if __name__ == "__main__":
     try:
