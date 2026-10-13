@@ -170,15 +170,24 @@ class AnanyaAI:
 
     @staticmethod
     def _is_temporary_overload_error(exc: Exception) -> bool:
-        """Identify transient server overloads such as HTTP 503."""
+        """Identify transient API/server failures that should trigger model fallback."""
         message = str(exc).lower()
         code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
         response = getattr(exc, "response", None)
         if code is None and response is not None:
             code = getattr(response, "status_code", None)
+        # 500/502/503/504 are transient server/gateway failures. Google may
+        # return 504 as DEADLINE_EXCEEDED; treat that like overload and try the
+        # next approved model instead of ending the user's turn immediately.
         return (
-            code == 503
+            code in (500, 502, 503, 504)
+            or "500 internal" in message
+            or "502 bad gateway" in message
             or "503 unavailable" in message
+            or "504 gateway timeout" in message
+            or "504 deadline_exceeded" in message
+            or "deadline expired before operation could complete" in message
+            or "gateway timeout" in message
             or "service unavailable" in message
             or "high demand" in message
             or "temporarily overloaded" in message
