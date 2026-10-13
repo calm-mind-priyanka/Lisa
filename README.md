@@ -24,7 +24,7 @@ Optional:
 - `PRIMARY_ADMIN` (defaults to `SANDY_USER_ID`)
 - `AI_GROUP_IDS` (comma-separated Telegram chat IDs; blank disables group replies)
 - `IGNORED_USER_IDS` (comma-separated sender IDs)
-- `GEMINI_MODEL` (optional preference; omit it to discover models available to your API key automatically. If a preferred model is unavailable, the bot tries other discovered `generateContent` models.)
+- `GEMINI_MODEL` (optional preference; only accepted if it matches one of the explicitly allowlisted model IDs with free-tier API pricing: `gemini-3.8-flash`, `gemini-3.6-flash`, `gemini-3.5-flash-lite`, or `gemini-3.1-flash-lite`. Leave blank to prefer them in that order.)
 - `VOICE_REPLIES` (`true` or `false`; default `false`)
 - `VOICE_NAME` (default `hi-IN-SwaraNeural`)
 - `MAX_HISTORY_TURNS` (default 12)
@@ -49,7 +49,7 @@ Send these as outgoing messages from the configured primary admin account:
 
 ## Important limitations
 - Memory is in RAM only and is lost on restart. MongoDB persistence is not included yet.
-- Gemini model discovery uses the models exposed to your API key and filters for `generateContent`; actual image/audio support and account access can still vary by model. If a model fails with a model-not-found error, the bot tries another discovered candidate. Quota, invalid-key, and permission errors are not automatically fixed by model switching.
+- Gemini model discovery is restricted to an explicit allowlist of model IDs that Google currently lists with free-tier API pricing. The bot never calls arbitrary discovered models or `gemini-flash-latest`; it tries only approved IDs, in priority order, and moves to another approved ID after model-unavailable, 503 overload, or 429 quota/rate-limit errors. Invalid-key, permission, billing, and malformed-request errors stop rather than silently changing models. Re-check Google's official pricing page because pricing and model availability can change. IMPORTANT: an API model having a free tier does not itself guarantee zero charges if your Google project is upgraded/configured for paid billing. To avoid API charges, keep the project on the free tier and check Google AI Studio usage/billing settings. The code cannot inspect or enforce the project's billing plan.
 - Voice replies use a synthetic TTS service, not a recording of a real person.
 - Test in a separate Koyeb service before replacing a working deployment.
 - The Telegram session string and API hash previously appeared in pasted source. Revoke the exposed Telegram session in Telegram Settings > Devices, create a fresh session, and store the new value only as a secret environment variable.

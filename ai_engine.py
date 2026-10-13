@@ -54,33 +54,37 @@ CONVERSATION AND PRIVACY
 """.strip()
 
 
+# These exact model IDs are currently documented by Google with free-tier API
+# pricing. Keep this allowlist intentionally narrow: discovery alone does NOT
+# reveal whether a model is free, so arbitrary discovered models must never be used.
+# Re-check Google's pricing page periodically because model availability/pricing can change.
+FREE_MODEL_PRIORITY = (
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+)
+FREE_MODEL_SET = set(FREE_MODEL_PRIORITY)
+
+
 def _model_name(model) -> str:
-    """Normalize SDK model resources such as 'models/gemini-flash-latest'."""
+    """Normalize SDK model resources such as 'models/gemini-3.8-flash'."""
     name = getattr(model, "name", "") or ""
-    return name.split("/", 1)[-1]
+    return name.split("/", 1)[-1].strip()
 
 
 def _model_rank(name: str):
-    """Prefer latest aliases and newer stable general-purpose Flash models."""
-    lower = name.lower()
-    if "flash-latest" in lower:
-        return (0, 0, 0, lower)
-    # Prefer stable Flash models, newer major/minor versions first.
-    match = re.search(r"gemini-(\d+)\.(\d+)-flash(?:$|-)", lower)
-    if match:
-        preview = any(tag in lower for tag in ("preview", "exp", "experimental"))
-        return (1 if not preview else 2, -int(match.group(1)), -int(match.group(2)), lower)
-    if "flash" in lower:
-        return (3, 0, 0, lower)
-    # A non-Flash Gemini generateContent model is a last-resort fallback.
-    return (4, 0, 0, lower)
+    """Order only the explicitly approved free-tier model IDs."""
+    try:
+        return FREE_MODEL_PRIORITY.index(name.lower())
+    except ValueError:
+        return len(FREE_MODEL_PRIORITY)
 
 
 def _is_candidate_model(model) -> bool:
+    """Accept only exact model IDs on the documented free-tier allowlist."""
     name = _model_name(model).lower()
-    if not name.startswith("gemini-"):
-        return False
-    if any(part in name for part in ("embedding", "embed", "tts", "image", "imagen", "veo", "live", "robotics", "aqa")):
+    if name not in FREE_MODEL_SET:
         return False
     actions = getattr(model, "supported_actions", None)
     if actions is None:
@@ -128,17 +132,21 @@ class AnanyaAI:
                     log.warning("Gemini API returned no compatible generateContent models")
             except Exception:
                 log.exception("Could not discover Gemini models; will try the configured preference")
-                # Do not hard-code a specific model as the normal path. If the
-                # list endpoint is temporarily unavailable, try only the user's
-                # configured preference; a later request can retry discovery.
+                # Discovery failure must not permit arbitrary models. Fall back
+                # only to this explicit free-tier allowlist; unavailable IDs will
+                # be rejected and the loop will move to the next approved ID.
                 if not self._models_discovered:
-                    self._model_candidates = []
+                    self._model_candidates = list(FREE_MODEL_PRIORITY)
+                    self._models_discovered = True
             return list(self._model_candidates)
 
     @staticmethod
     def _is_model_availability_error(exc: Exception) -> bool:
         message = str(exc).lower()
         code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        if code is None and response is not None:
+            code = getattr(response, "status_code", None)
         return (
             code == 404
             or "404 not_found" in message
@@ -149,47 +157,104 @@ class AnanyaAI:
             or "unsupported model" in message
         )
 
-    async def _generate_with_model_fallback(self, contents, config):
-        candidates = await self._discover_models()
-        ordered = []
-        # Try an explicit Koyeb preference first, but never get stuck on it.
-        if self.preferred_model:
-            ordered.append(self.preferred_model.removeprefix("models/"))
-        if self.model_name and self.model_name not in ordered:
-            ordered.append(self.model_name.removeprefix("models/"))
-        ordered.extend(name for name in candidates if name not in ordered)
+    @staticmethod
+    def _is_temporary_overload_error(exc: Exception) -> bool:
+        """Identify transient server overloads such as HTTP 503."""
+        message = str(exc).lower()
+        code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        if code is None and response is not None:
+            code = getattr(response, "status_code", None)
+        return (
+            code == 503
+            or "503 unavailable" in message
+            or "service unavailable" in message
+            or "high demand" in message
+            or "temporarily overloaded" in message
+            or "model is overloaded" in message
+        )
 
+    @staticmethod
+    def _is_quota_or_rate_limit_error(exc: Exception) -> bool:
+        """Identify 429/resource-exhausted errors so another approved model can be tried."""
+        message = str(exc).lower()
+        code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+        response = getattr(exc, "response", None)
+        if code is None and response is not None:
+            code = getattr(response, "status_code", None)
+        return (
+            code == 429
+            or "429" in message
+            or "resource_exhausted" in message
+            or "rate limit" in message
+            or "quota exceeded" in message
+            or "too many requests" in message
+        )
+
+    async def _generate_with_model_fallback(self, contents, config):
+        discovered = await self._discover_models()
+
+        # A configured model is only a preference if it is explicitly allowlisted.
+        # Never use GEMINI_MODEL (or any discovered model) outside FREE_MODEL_SET.
+        preferred = self.preferred_model.removeprefix("models/").strip().lower()
+        if preferred and preferred not in FREE_MODEL_SET:
+            log.warning(
+                "Ignoring GEMINI_MODEL=%s because it is not on the free-tier model allowlist",
+                preferred,
+            )
+
+        available = set(discovered)
+        ordered = []
+        if preferred in FREE_MODEL_SET and preferred in available:
+            ordered.append(preferred)
+        ordered.extend(name for name in FREE_MODEL_PRIORITY if name in available and name not in ordered)
+
+        # If model discovery succeeded but returned no approved IDs, fail closed.
+        # Do not choose a paid/unknown model just to make the request succeed.
         if not ordered:
             raise RuntimeError(
-                "Gemini could not list available models and GEMINI_MODEL is not configured. "
-                "Check the API key/network, then retry."
+                "No approved free-tier Gemini model is available to this API key. "
+                "Check model access and the official Gemini API pricing page."
             )
 
         last_error = None
-        for index, name in enumerate(ordered):
-            try:
-                response = await asyncio.to_thread(
-                    self.client.models.generate_content,
-                    model=name,
-                    contents=contents,
-                    config=config,
-                )
-                self.model_name = name
-                log.info("Gemini response generated with model=%s", name)
-                return response
-            except Exception as exc:
-                last_error = exc
-                if not self._is_model_availability_error(exc):
-                    # Quota, invalid key, permissions, network, and content
-                    # errors should not be disguised as model-selection errors.
+        for name in ordered:
+            # Short retries for transient overload/rate-limit responses, then move
+            # to the next approved free-tier model. Never leave the allowlist.
+            for attempt, delay in enumerate((0, 1.5, 3.0)):
+                if delay:
+                    await asyncio.sleep(delay)
+                try:
+                    response = await asyncio.to_thread(
+                        self.client.models.generate_content,
+                        model=name,
+                        contents=contents,
+                        config=config,
+                    )
+                    self.model_name = name
+                    log.info("Gemini response generated with approved free-tier model=%s", name)
+                    return response
+                except Exception as exc:
+                    last_error = exc
+                    if self._is_model_availability_error(exc):
+                        log.warning("Approved Gemini model %s unavailable; trying next approved model", name)
+                        break
+                    if self._is_temporary_overload_error(exc):
+                        if attempt < 2:
+                            log.warning("Free-tier Gemini model %s overloaded (503); retry %s/2", name, attempt + 1)
+                            continue
+                        log.warning("Free-tier Gemini model %s remains overloaded; trying next approved model", name)
+                        break
+                    if self._is_quota_or_rate_limit_error(exc):
+                        if attempt < 2:
+                            log.warning("Free-tier Gemini model %s rate-limited/quota-limited; retry %s/2", name, attempt + 1)
+                            continue
+                        log.warning("Free-tier Gemini model %s remains quota/rate limited; trying next approved model", name)
+                        break
+                    # Invalid key, permission/billing errors, malformed requests, and
+                    # content errors are not fixed by changing models; stop clearly.
                     raise
-                log.warning("Gemini model %s unavailable; trying another discovered model", name)
-                # Refresh the list once when a model returns 404, then continue
-                # with newly discovered options as well as the old candidates.
-                if index == 0:
-                    refreshed = await self._discover_models(refresh=True)
-                    ordered.extend(candidate for candidate in refreshed if candidate not in ordered)
-        raise last_error or RuntimeError("No compatible Gemini model succeeded")
+        raise last_error or RuntimeError("No approved free-tier Gemini model succeeded")
 
     async def reply(
         self,
