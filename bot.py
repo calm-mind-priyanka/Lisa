@@ -276,6 +276,9 @@ client = TelegramClient(
     API_HASH
 )
 
+# Filled after connecting; Telethon TelegramClient does not have a .uid attribute.
+SELF_ID = None
+
 admin_dm_pending = {}
 
 
@@ -792,7 +795,7 @@ async def message_handler(event):
             debug_skip("group ID is not in watchlist (accepted ID aliases checked)", event)
             return
 
-        if event.sender_id in (PRIMARY_ADMIN, SECONDARY_ADMIN, client.uid):
+        if event.sender_id in (PRIMARY_ADMIN, SECONDARY_ADMIN, SELF_ID):
             debug_skip("sender is an excluded admin or this account", event)
             return
 
@@ -860,7 +863,11 @@ async def message_handler(event):
 # Main Execution
 # =========================
 async def main():
+    global SELF_ID
     await client.start()
+    me = await client.get_me()
+    SELF_ID = me.id if me else None
+    log.info("Telegram account identity loaded.")
 
     asyncio.create_task(
         dm_cleanup_watcher()
