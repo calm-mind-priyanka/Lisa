@@ -14,12 +14,11 @@ from datetime import datetime, timedelta, timezone
 # =========================
 # Logging Configuration
 # =========================
+# Logs go to stdout only (Koyeb runtime logs). The bot does not create a local
+# log file, and it never logs incoming message text.
 logging.basicConfig(
     level=logging.INFO,
-    handlers=[
-        logging.FileHandler("error.log", encoding="utf-8"),
-        logging.StreamHandler(sys.stdout)
-    ],
+    handlers=[logging.StreamHandler(sys.stdout)],
     format="%(asctime)s - %(levelname)s - %(message)s"
 )
 log = logging.getLogger("bot")
@@ -127,6 +126,36 @@ def save_groups():
         log.error(f"Error saving groups: {e}")
 
 
+def group_id_aliases(value):
+    """Return equivalent Telegram supergroup ID representations.
+
+    Telethon typically reports -100<channel_id>; some users enter only
+    the positive channel_id when configuring /addgroup.
+    """
+    try:
+        gid = int(value)
+    except (TypeError, ValueError):
+        return set()
+    aliases = {gid, abs(gid)}
+    raw = str(gid)
+    if raw.startswith("-100") and len(raw) > 4:
+        try:
+            aliases.add(int(raw[4:]))
+        except ValueError:
+            pass
+    elif gid > 0:
+        aliases.add(int(f"-100{gid}"))
+    return aliases
+
+
+def is_watched_group(chat_id):
+    incoming_aliases = group_id_aliases(chat_id)
+    for saved_id in groups:
+        if incoming_aliases.intersection(group_id_aliases(saved_id)):
+            return True
+    return False
+
+
 def save_settings():
     try:
         data = {
@@ -169,8 +198,6 @@ last_sent_messages = {}
 auto_debug = {
     "last_seen_at": None,
     "last_chat_id": None,
-    "last_chat_title": None,
-    "last_sender_id": None,
     "last_message_type": None,
     "last_decision": "No incoming messages observed yet",
     "last_error": None,
@@ -183,7 +210,7 @@ def debug_skip(reason: str, event=None):
     auto_debug["last_decision"] = f"SKIPPED: {reason}"
     auto_debug["skip_counts"][reason] = auto_debug["skip_counts"].get(reason, 0) + 1
     chat_id = getattr(event, "chat_id", None) if event else None
-    log.info("AUTO-REPLY DEBUG | decision=SKIP | reason=%s | chat_id=%s", reason, chat_id)
+    log.debug("AUTO-REPLY DEBUG | decision=SKIP | reason=%s | chat_id=%s", reason, chat_id)
 
 bot_active = True
 emergency_stop = False
@@ -492,9 +519,9 @@ async def primary_admin_handler(e):
             f"• Emergency stop: `{emergency_stop}`\n"
             f"• Flood pause active: `{time.time() < flood_pause_until}`\n"
             f"• Watched groups: `{sorted(groups)}`\n"
+            f"• Watched ID aliases: `{sorted(set().union(*(group_id_aliases(g) for g in groups)) if groups else set())}`\n"
             f"• Last incoming seen: `{auto_debug['last_seen_at'] or 'None'}`\n"
-            f"• Last chat: `{auto_debug['last_chat_title'] or 'Unknown'}` (`{auto_debug['last_chat_id']}`)\n"
-            f"• Last sender ID: `{auto_debug['last_sender_id']}`\n"
+            f"• Last chat ID: `{auto_debug['last_chat_id']}`\n"
             f"• Last message type: `{auto_debug['last_message_type']}`\n"
             f"• Last decision: `{auto_debug['last_decision']}`\n"
             f"• Replies sent: `{auto_debug['reply_count']}`\n"
@@ -710,30 +737,29 @@ async def message_handler(event):
     auto_debug["seen_count"] += 1
     auto_debug["last_seen_at"] = fmt_ist(now_utc())
     auto_debug["last_chat_id"] = event.chat_id
-    auto_debug["last_sender_id"] = event.sender_id
     auto_debug["last_message_type"] = (
         "text" if (event.raw_text or "").strip() else "media/non-text"
     )
     auto_debug["last_error"] = None
 
     try:
-        try:
-            chat = await event.get_chat()
-            auto_debug["last_chat_title"] = (
-                getattr(chat, "title", None)
-                or getattr(chat, "username", None)
-                or getattr(chat, "first_name", None)
-                or str(event.chat_id)
-            )
-        except Exception as chat_error:
-            auto_debug["last_chat_title"] = "Could not resolve chat"
-            log.warning("AUTO-REPLY DEBUG | could not resolve chat %s: %s", event.chat_id, chat_error)
-
         now_ts = time.time()
-        text_preview = (event.raw_text or "").replace("\n", " ")[:80]
-        log.info(
-            "AUTO-REPLY DEBUG | incoming | chat_id=%s | sender_id=%s | private=%s | text=%r",
-            event.chat_id, event.sender_id, event.is_private, text_preview
+
+        # Avoid expensive entity lookups and per-message INFO logging for every
+        # unrelated group the user account happens to belong to. This is also
+        # important for CPU usage in busy groups.
+        if not event.is_private and not is_watched_group(event.chat_id):
+            debug_skip("group ID is not in watchlist (accepted ID aliases checked)", event)
+            log.debug(
+                "AUTO-REPLY DEBUG | untracked group | chat_id=%s",
+                event.chat_id
+            )
+            return
+
+        # Minimal diagnostics only: never log message text or sender details.
+        log.debug(
+            "AUTO-REPLY DEBUG | incoming event | chat_id=%s | private=%s",
+            event.chat_id, event.is_private
         )
 
         if now_ts < flood_pause_until:
@@ -761,13 +787,9 @@ async def message_handler(event):
                 debug_skip("private-message auto-reply is not configured", event)
             return
 
-        # Normalize IDs to integers so older string-valued groups.json entries work.
-        try:
-            watched_group_ids = {int(gid) for gid in groups}
-        except (TypeError, ValueError):
-            watched_group_ids = set()
-        if event.chat_id not in watched_group_ids:
-            debug_skip("group ID is not in watchlist (compare /debugauto IDs)", event)
+        # Group matching was checked early using canonical and positive ID aliases.
+        if not is_watched_group(event.chat_id):
+            debug_skip("group ID is not in watchlist (accepted ID aliases checked)", event)
             return
 
         if event.sender_id in (PRIMARY_ADMIN, SECONDARY_ADMIN, client.uid):
