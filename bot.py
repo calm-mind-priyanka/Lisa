@@ -82,7 +82,8 @@ def load_data():
     if os.path.exists(GROUPS_FILE):
         try:
             with open(GROUPS_FILE, "r", encoding="utf-8") as f:
-                groups = set(json.load(f))
+                # Older deployments may have stored IDs as strings.
+                groups = {int(gid) for gid in json.load(f)}
         except Exception as e:
             log.error(f"Error loading groups: {e}")
 
@@ -164,6 +165,25 @@ def save_settings():
 # =========================
 last_reply = {}
 last_sent_messages = {}
+# Diagnostics for the latest incoming message and why it was handled/skipped.
+auto_debug = {
+    "last_seen_at": None,
+    "last_chat_id": None,
+    "last_chat_title": None,
+    "last_sender_id": None,
+    "last_message_type": None,
+    "last_decision": "No incoming messages observed yet",
+    "last_error": None,
+    "seen_count": 0,
+    "reply_count": 0,
+    "skip_counts": {},
+}
+
+def debug_skip(reason: str, event=None):
+    auto_debug["last_decision"] = f"SKIPPED: {reason}"
+    auto_debug["skip_counts"][reason] = auto_debug["skip_counts"].get(reason, 0) + 1
+    chat_id = getattr(event, "chat_id", None) if event else None
+    log.info("AUTO-REPLY DEBUG | decision=SKIP | reason=%s | chat_id=%s", reason, chat_id)
 
 bot_active = True
 emergency_stop = False
@@ -460,6 +480,30 @@ async def primary_admin_handler(e):
 
         return
 
+    # Auto-reply diagnostics (visible only to the primary admin)
+    if txt.startswith("/debugauto"):
+        recent_skips = auto_debug["skip_counts"] or {"None yet": 0}
+        skip_lines = "\n".join(
+            f"• {reason}: {count}" for reason, count in sorted(recent_skips.items())
+        )
+        report = (
+            "🔎 **Auto-reply diagnostics**\n"
+            f"• Bot active: `{bot_active}`\n"
+            f"• Emergency stop: `{emergency_stop}`\n"
+            f"• Flood pause active: `{time.time() < flood_pause_until}`\n"
+            f"• Watched groups: `{sorted(groups)}`\n"
+            f"• Last incoming seen: `{auto_debug['last_seen_at'] or 'None'}`\n"
+            f"• Last chat: `{auto_debug['last_chat_title'] or 'Unknown'}` (`{auto_debug['last_chat_id']}`)\n"
+            f"• Last sender ID: `{auto_debug['last_sender_id']}`\n"
+            f"• Last message type: `{auto_debug['last_message_type']}`\n"
+            f"• Last decision: `{auto_debug['last_decision']}`\n"
+            f"• Replies sent: `{auto_debug['reply_count']}`\n"
+            f"• Last error: `{auto_debug['last_error'] or 'None'}`\n"
+            f"• Skip counts:\n{skip_lines}"
+        )
+        await e.reply(report[:4000])
+        return
+
     # Update command
     if txt.startswith("/update"):
         m = await e.reply(
@@ -662,132 +706,132 @@ async def secondary_transfer(e):
 async def message_handler(event):
     global emergency_stop, flood_pause_until, bot_active
 
-    try:
-        now_ts = time.time()
+    # Record every incoming message first, even if a later condition skips it.
+    auto_debug["seen_count"] += 1
+    auto_debug["last_seen_at"] = fmt_ist(now_utc())
+    auto_debug["last_chat_id"] = event.chat_id
+    auto_debug["last_sender_id"] = event.sender_id
+    auto_debug["last_message_type"] = (
+        "text" if (event.raw_text or "").strip() else "media/non-text"
+    )
+    auto_debug["last_error"] = None
 
-        if (
-            now_ts < flood_pause_until
-            or emergency_stop
-            or not bot_active
-        ):
+    try:
+        try:
+            chat = await event.get_chat()
+            auto_debug["last_chat_title"] = (
+                getattr(chat, "title", None)
+                or getattr(chat, "username", None)
+                or getattr(chat, "first_name", None)
+                or str(event.chat_id)
+            )
+        except Exception as chat_error:
+            auto_debug["last_chat_title"] = "Could not resolve chat"
+            log.warning("AUTO-REPLY DEBUG | could not resolve chat %s: %s", event.chat_id, chat_error)
+
+        now_ts = time.time()
+        text_preview = (event.raw_text or "").replace("\n", " ")[:80]
+        log.info(
+            "AUTO-REPLY DEBUG | incoming | chat_id=%s | sender_id=%s | private=%s | text=%r",
+            event.chat_id, event.sender_id, event.is_private, text_preview
+        )
+
+        if now_ts < flood_pause_until:
+            debug_skip("flood pause active", event)
+            return
+        if emergency_stop:
+            debug_skip("emergency stop active", event)
+            return
+        if not bot_active:
+            debug_skip("bot paused (/stopbot)", event)
             return
 
-        # Private messages
+        # Private messages retain the existing separate reply behavior.
         if event.is_private:
             if pm_msg:
-                await asyncio.sleep(
-                    random.uniform(0.5, 1.2)
-                )
-
+                await asyncio.sleep(random.uniform(0.5, 1.2))
                 await send_rl.wait()
-
                 m = await event.reply(pm_msg)
-
+                auto_debug["reply_count"] += 1
+                auto_debug["last_decision"] = "REPLIED: private-message reply sent"
+                log.info("AUTO-REPLY DEBUG | private reply sent | chat_id=%s", event.chat_id)
                 if delay > 0:
-                    asyncio.create_task(
-                        safe_delete(m, min(delay, 120))
-                    )
-
+                    asyncio.create_task(safe_delete(m, min(delay, 120)))
+            else:
+                debug_skip("private-message auto-reply is not configured", event)
             return
 
-        # Only process configured groups
-        if event.chat_id not in groups:
+        # Normalize IDs to integers so older string-valued groups.json entries work.
+        try:
+            watched_group_ids = {int(gid) for gid in groups}
+        except (TypeError, ValueError):
+            watched_group_ids = set()
+        if event.chat_id not in watched_group_ids:
+            debug_skip("group ID is not in watchlist (compare /debugauto IDs)", event)
             return
 
-        # Ignore configured admins and this account
-        if event.sender_id in (
-            PRIMARY_ADMIN,
-            SECONDARY_ADMIN,
-            client.uid
-        ):
+        if event.sender_id in (PRIMARY_ADMIN, SECONDARY_ADMIN, client.uid):
+            debug_skip("sender is an excluded admin or this account", event)
             return
 
-        # Ignore bot accounts
-        if (
-            event.sender
-            and getattr(event.sender, "bot", False)
-        ):
+        sender = await event.get_sender()
+        if sender and getattr(sender, "bot", False):
+            debug_skip("sender is a bot account", event)
             return
 
-        # Ignore channel-originated outgoing messages
         if event.is_channel and event.out:
+            debug_skip("outgoing channel message", event)
             return
 
-        # Ignore messages containing links or mentions
+        # Preserve the existing link/mention exclusion, but log the exact reason.
         if event.message.entities:
             for ent in event.message.entities:
-                if isinstance(
-                    ent,
-                    (
-                        MessageEntityUrl,
-                        MessageEntityTextUrl,
-                        MessageEntityMention
-                    )
-                ):
+                if isinstance(ent, (MessageEntityUrl, MessageEntityTextUrl, MessageEntityMention)):
+                    debug_skip(f"message contains excluded entity ({type(ent).__name__})", event)
                     return
 
-        # Respect reply gap
-        if now_ts - last_reply.get(event.chat_id, 0) < gap:
+        if not msg:
+            debug_skip("group reply message is empty; use /setmsg", event)
             return
 
-        await asyncio.sleep(
-            random.uniform(0.8, 1.8)
-        )
+        elapsed = now_ts - last_reply.get(event.chat_id, 0)
+        if elapsed < gap:
+            debug_skip(f"reply gap active ({int(gap - elapsed)}s remaining)", event)
+            return
 
-        last_reply[event.chat_id] = time.time()
-
-        # Reply to the triggering message
+        await asyncio.sleep(random.uniform(0.8, 1.8))
         await send_rl.wait()
-
-        m = await event.reply(msg)
-
-        last_sent_messages[event.chat_id] = m
+        reply_message = await event.reply(msg)
+        last_reply[event.chat_id] = time.time()
+        last_sent_messages[event.chat_id] = reply_message
+        auto_debug["reply_count"] += 1
+        auto_debug["last_decision"] = "REPLIED: group auto-reply sent successfully"
+        log.info("AUTO-REPLY DEBUG | reply sent | chat_id=%s | reply_message_id=%s", event.chat_id, reply_message.id)
 
         if delay > 0:
-            asyncio.create_task(
-                safe_delete(m, delay)
-            )
+            asyncio.create_task(safe_delete(reply_message, delay))
 
     except FloodWaitError as fwe:
-        wait_sec = int(
-            getattr(fwe, "seconds", 30)
-        )
-
+        wait_sec = int(getattr(fwe, "seconds", 30))
         flood_pause_until = time.time() + wait_sec
-
-        resume_time = fmt_ist(
-            datetime.fromtimestamp(
-                time.time() + wait_sec,
-                tz=timezone.utc
-            )
-        )
-
-        log.warning(
-            f"Flood wait triggered: sleeping for {wait_sec}s"
-        )
-
-        await notify_admin(
-            f"⚠️ Flood wait triggered! "
-            f"Pausing for {wait_sec}s until {resume_time}."
-        )
-
+        resume_time = fmt_ist(datetime.fromtimestamp(time.time() + wait_sec, tz=timezone.utc))
+        auto_debug["last_error"] = f"FloodWaitError: {wait_sec}s"
+        auto_debug["last_decision"] = f"ERROR: Telegram flood wait; paused {wait_sec}s"
+        log.warning("Flood wait triggered: sleeping for %ss", wait_sec)
+        await notify_admin(f"⚠️ Flood wait triggered! Pausing for {wait_sec}s until {resume_time}.")
         await asyncio.sleep(wait_sec)
-
         flood_pause_until = 0
+        await notify_admin("✅ Flood wait over. Bot resumed.")
 
-        await notify_admin(
-            "✅ Flood wait over. Bot resumed."
-        )
+    except ChatWriteForbiddenError as exc:
+        auto_debug["last_error"] = f"ChatWriteForbiddenError: {exc}"
+        auto_debug["last_decision"] = "ERROR: Telegram does not allow writing in this group"
+        log.exception("Chat write forbidden in chat %s", event.chat_id)
 
-    except ChatWriteForbiddenError:
-        log.warning(
-            f"Chat write forbidden in chat {event.chat_id}"
-        )
-
-    except Exception as e:
-        log.error(
-            f"[Handler Error] {e}"
-        )
+    except Exception as exc:
+        auto_debug["last_error"] = f"{type(exc).__name__}: {exc}"
+        auto_debug["last_decision"] = f"ERROR: {type(exc).__name__}: {exc}"
+        log.exception("AUTO-REPLY HANDLER ERROR | chat_id=%s", event.chat_id)
 
 
 # =========================
