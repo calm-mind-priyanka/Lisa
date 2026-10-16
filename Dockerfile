@@ -6,7 +6,8 @@ COPY . .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Lets Koyeb know we are exposing this port for FastAPI health check
+Lets Koyeb know we are exposing this port for FastAPI health check
+
 EXPOSE 8080
 
 CMD ["python3", "bot.py"]
